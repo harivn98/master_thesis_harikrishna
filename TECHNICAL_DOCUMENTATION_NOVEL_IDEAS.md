@@ -3,7 +3,7 @@
 ## Master Thesis — Video Inpainting for Lane Marking Generation in Autonomous Driving
 
 **Author:** Hariharan Baskar  
-**Date:** February 19, 2026
+**Date:** February 22, 2026
 
 ---
 
@@ -591,6 +591,24 @@ TRAINED_FLUXFILL_GCS_PATH="workspace/user/hbaskar/.../fluxfill_single_white_soli
 
 Each checkpoint is stored independently, allowing selective deployment during inference.  The master pipeline's `TRAINED_FLUXFILL_GCS_PATH` variable points at the desired checkpoint.
 
+**Training Results (Run: 20260222_201003):**
+
+All 5 jobs executed in parallel on separate A100 80GB GKE nodes. Identical hyperparameters: rank=16, alpha=16, lr=1e-5, cosine schedule, 50 warmup steps, 5 epochs, batch=1, grad_accum=4, seed=42. Training speed: ~6.8s/step.
+
+| # | Lane Type | Images | Steps | Time | Epoch Avg Losses (1→5) | Status |
+|---|-----------|--------|-------|------|----------------------|--------|
+| 1 | `single_yellow_solid` | 372 | 465 | ~53 min | 0.186 → 0.178 → 0.165 → 0.176 → **0.165** | ✅ Complete |
+| 2 | `single_white_dashed` | 373 | 470 | ~53 min | 0.148 → 0.158 → 0.149 → 0.171 → **0.146** | ✅ Complete |
+| 3 | `single_white_solid` | 1,522 | 1,905 | ~3.6 hrs | Epoch 1: 0.167 (in progress) | 🔄 Running |
+| 4 | `double_white_solid` | 4,612 | 5,765 | ~10.9 hrs | (in progress) | 🔄 Running |
+| 5 | `double_yellow_solid` | 6,493 | 8,120 | ~15.3 hrs | (in progress) | 🔄 Running |
+
+Key observations:
+- Loss stabilizes by epoch 3 for completed jobs (final-epoch avg: 0.145–0.165)
+- Epoch duration is highly consistent within each job (~633s ±2s for 370-image datasets)
+- GCS upload of final checkpoints completes in ~8 seconds
+- Harmless `gcsfs`/`aiohttp` session cleanup traceback at exit does not affect results
+
 **Why This Is Novel:** First LoRA fine-tuning pipeline specifically designed for FluxFill inpainting on structured lane marking datasets, with automated multi-variant training producing one specialized checkpoint per lane-marking type, integrated into a cloud workflow system.
 
 ---
@@ -622,11 +640,12 @@ Use NVIDIA's Alpamayo-R1-10B VLA model to **predict driving trajectories on both
    - `t0_us = (total_frames − 1) × 0.125s × 1e6` for dataset alignment
    - Last 4 consecutive frames per camera used for inference
 
-4. **Dual Inference:**
+4. **Dual Inference** (with `black_non_target_cameras=true`):
    - **Original inference:** Run Alpamayo on unmodified dataset frames → `original_min_ade`
    - **Frame replacement:** Substitute one camera's last-4-frames with VP output (with bilinear resize if needed)
    - **Generated inference:** Run Alpamayo on modified frames → `min_ade_meters`
    - Both share identical ego-motion history and all other camera views
+   - Non-target cameras are blacked out (zeroed), isolating the effect of the edited front camera on trajectory prediction
 
 5. **minADE Computation:**
    $$\text{minADE} = \min_{s \in S} \frac{1}{T} \sum_{t=1}^{T} \| \hat{p}_{xy}^{(s)}(t) - p_{xy}^{gt}(t) \|_2$$
@@ -643,6 +662,27 @@ Use NVIDIA's Alpamayo-R1-10B VLA model to **predict driving trajectories on both
 | `*_comparison.mp4` | H.264 | Side-by-side original vs. generated with trajectories |
 
 **Why This Is Novel:** This is the **first use of a VLA model as an evaluation metric for video inpainting**. By comparing trajectory predictions on original vs. edited videos, we obtain a functionally meaningful measure of inpainting quality that goes beyond pixel-level metrics.
+
+**Experimental Results (Run 006 — 100 videos × 5 prompts × 2 variants = 1,000 experiments, `black_non_target_cameras=true`):**
+
+Alpamayo Run IDs: `06_p{1-5}_gen_video_20260222_*` (100frames) and `06_p{1-5}_gen_vps90_video_20260222_*` (vps90).
+
+Baseline (original unedited videos): mean minADE = 3.778 m, median = 2.646 m.
+
+| Prompt | Lane Type | minADE (100fr) | Δ from Baseline | Improved/Degraded |
+|--------|-----------|---------------|----------------|-------------------|
+| p1 | Single white solid | 3.842 m | +0.063 m | 47% / 53% |
+| p2 | Double white solid | 3.995 m | +0.217 m | 47% / 53% |
+| p3 | Single yellow solid | 3.895 m | +0.117 m | **52%** / 48% |
+| p4 | Double yellow solid | 3.917 m | +0.139 m | 46% / 54% |
+| p5 | Single white dashed | 4.065 m | +0.286 m | 40% / **60%** |
+
+Key findings:
+- **p3 (single yellow solid)** achieves the highest improvement rate (52%) — the only prompt where more videos improved than degraded
+- **p5 (dashed white)** performs worst (40% improvement, +0.286 m Δ), correlated with 50% caption refinement failure rate
+- When editing helps, the average improvement is substantial (−0.9 m); when it hurts, degradation averages +1.1 m
+- vps90 variant performs marginally worse than 100frames (44.4% vs 46.4% improvement rate)
+- These results use base FluxFill without LoRA and `black_non_target_cameras=true` (non-target cameras blacked out); trained LoRA checkpoints are expected to improve results
 
 ---
 
@@ -797,11 +837,13 @@ Raw AD Videos (PhysicalAI-AV, GCS)
 
 ### Compute Requirements
 
-| Stage | GPU | VRAM | Duration (per video) | Container |
-|-------|-----|------|---------------------|-----------|
-| SAM2 | A100 80GB | ~8 GB | ~2 min | `sam2_container` |
-| VideoPainter | A100 80GB | ~40 GB (peak) | ~10 min | `vp_container` |
-| Alpamayo | A100 80GB | ~24 GB | ~1 min | `alpamayo_vla` |
+| Stage | GPU | VRAM (Peak) | Duration (per video, median) | Container |
+|-------|-----|-------------|------------------------------|----------|
+| SAM2 | A100 80GB | ~8 GB | **2.7s** (mean 10.4s due to 2 outliers) | `sam2_container` |
+| VideoPainter | A100 80GB | **42.4 GB** | **455s** (7.6 min) | `vp_container` |
+| Alpamayo | A100 80GB | **21.5 GB** | **34s** | `alpamayo_vla` |
+
+*Measured on Run 006 (100 videos × 5 prompts). Total per-experiment wall time: 12–20 hours on single A100.*
 
 ### Model Specifications
 
