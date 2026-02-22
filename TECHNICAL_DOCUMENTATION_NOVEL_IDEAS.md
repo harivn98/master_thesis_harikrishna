@@ -554,7 +554,44 @@ A complete LoRA fine-tuning pipeline (`training_workflow.py` + `train/train_flux
 - Output checkpoints uploaded to GCS with timestamp-based run IDs
 - A100 80GB GPU allocation
 
-**Why This Is Novel:** First LoRA fine-tuning pipeline specifically designed for FluxFill inpainting on structured lane marking datasets, integrated into a cloud workflow system.
+**Multi-Dataset Training — 5 Specialized LoRA Checkpoints:**
+
+The pipeline supports training **5 independent LoRA checkpoints** in parallel, one per lane-marking combination.  This is driven by `scripts/build_and_run_training_all.sh`, which iterates over the 5 filtered datasets produced by `build_and_run_sorting_data.sh` and submits a separate HLX training workflow for each:
+
+| # | Dataset (Input) | Checkpoint (Output) | Lane Type |
+|---|----------------|---------------------|-----------|
+| 1 | `td-chunk0-99_single_white_solid/` | `fluxfill_single_white_solid_<TS>/` | Single solid white |
+| 2 | `td-chunk0-99_double_white_solid/` | `fluxfill_double_white_solid_<TS>/` | Double solid white |
+| 3 | `td-chunk0-99_single_yellow_solid/` | `fluxfill_single_yellow_solid_<TS>/` | Single solid yellow |
+| 4 | `td-chunk0-99_double_yellow_solid/` | `fluxfill_double_yellow_solid_<TS>/` | Double solid yellow |
+| 5 | `td-chunk0-99_single_white_dashed/` | `fluxfill_single_white_dashed_<TS>/` | Single dashed white |
+
+**End-to-end flow:**
+```
+data_generation.py          → td-chunk0-99/                  (raw training triplets)
+filter_fluxfill_dataset.py  → td-chunk0-99_<lane_type>/      (5 filtered subsets)
+training_workflow.py        → fluxfill_<lane_type>_<TS>/      (5 LoRA checkpoints)
+```
+
+**Usage:**
+```bash
+# Step 1: Generate training data (chunks 0–99)
+bash segmentation/sam2/scripts/build_and_run_training_data.sh 0 99
+
+# Step 2: Sort into 5 lane-type datasets
+bash segmentation/sam2/scripts/build_and_run_sorting_data.sh 0 99
+
+# Step 3: Train 5 LoRA checkpoints (one per lane type)
+bash generation/VideoPainter/scripts/build_and_run_training_all.sh 0 99
+
+# Step 4: Use a specific checkpoint for inference
+TRAINED_FLUXFILL_GCS_PATH="workspace/user/hbaskar/.../fluxfill_single_white_solid_<TS>" \
+  STAGES=2 bash scripts/build_and_run.sh
+```
+
+Each checkpoint is stored independently, allowing selective deployment during inference.  The master pipeline's `TRAINED_FLUXFILL_GCS_PATH` variable points at the desired checkpoint.
+
+**Why This Is Novel:** First LoRA fine-tuning pipeline specifically designed for FluxFill inpainting on structured lane marking datasets, with automated multi-variant training producing one specialized checkpoint per lane-marking type, integrated into a cloud workflow system.
 
 ---
 
