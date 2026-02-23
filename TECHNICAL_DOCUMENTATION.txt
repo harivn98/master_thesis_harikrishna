@@ -180,8 +180,8 @@ FILES:
 
 KEY FEATURES:
 1. Automatic road region detection using fixed point grid:
-   - 9-point grid positioned for typical road perspective
-   - Points at (0.5, 0.85), (0.4, 0.75), (0.6, 0.75), etc.
+   - 6-point grid positioned in bottom half of frame for typical road perspective
+   - Points at (0.50, 0.65), (0.35, 0.75), (0.65, 0.75), (0.25, 0.80), (0.75, 0.80), (0.50, 0.85)
    - Optimized for front-facing vehicle cameras
    
 2. SAM2VideoPredictorVOS integration:
@@ -335,8 +335,8 @@ TRAINING SYSTEM:
    
 2. LoRA configuration:
    - Target modules: transformer blocks
-   - Rank: 128 (configurable)
-   - Alpha: 128
+   - Rank: 16 (configurable)
+   - Alpha: 16
    - Dropout: 0.0
    
 3. Training optimizations:
@@ -816,8 +816,8 @@ COMPUTE RESOURCES:
 
 DOCKER CONTAINERS (UPDATED):
   1. Master Orchestrator: python:3.10-slim (lightweight, no GPU)
-  2. SAM2: pytorch/pytorch:2.1.0-cuda11.8-cudnn8-devel
-  3. VideoPainter: pytorch/pytorch:2.1.0-cuda11.8-cudnn8-devel
+  2. SAM2: nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+  3. VideoPainter: nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
   4. Alpamayo: nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04 (Python 3.12)
 
 INNOVATION: Complete cloud-native workflow orchestration for multi-stage
@@ -850,7 +850,7 @@ Key Parameters:
 - MODEL_CFG: configs/sam2.1/sam2.1_hiera_l.yaml
 - MAX_FRAMES: 150
 - FRAMES_PER_SECOND: 8
-- Point grid: 9 points at road-optimized positions
+- Point grid: 6 points at road-optimized positions (bottom half only)
 
 Output Structure:
   preprocessed_data_vp/{run_id}/{video_id}/
@@ -949,8 +949,8 @@ Training Architecture:
   Base Model: FLUX.1 Fill (black-forest-labs)
   LoRA Config:
     - Target: transformer blocks
-    - Rank: 128
-    - Alpha: 128
+    - Rank: 16
+    - Alpha: 16
     - Modules: ["to_k", "to_q", "to_v", "to_out.0"]
   
 Training Loop:
@@ -1328,7 +1328,7 @@ DOCKER CONTAINERS
      - hlx-wf
    
 2. SAM2 Container
-   Base: pytorch/pytorch:2.1.0-cuda11.8-cudnn8-devel
+   Base: nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
    Additional:
      - SAM2 installation (pip install -e .)
      - ffmpeg
@@ -1337,7 +1337,7 @@ DOCKER CONTAINERS
      - qwen-vl-utils
    
 3. VideoPainter Container
-   Base: pytorch/pytorch:2.1.0-cuda11.8-cudnn8-devel
+   Base: nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
    Additional:
      - Custom diffusers fork (VideoPainter branch)
      - CogVideoX dependencies
@@ -1859,15 +1859,15 @@ Run ID Timestamp: 20260222_201003
 └─────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ JOB 3: single_white_solid                                  🔄 IN PROGRESS  │
+│ JOB 3: single_white_solid                                  ✅ COMPLETE     │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ Dataset: 1,522 images   Total Steps: 1,905   Est. Time: ~3.6 hours         │
-│ Status: ~50% complete (epoch 2+, step ~950/1905)                            │
+│ Dataset: 1,522 images   Total Steps: 1,905   Time: ~3.6 hours              │
+│ Run ID: fluxfill_single_white_solid_20260222_201003                         │
+│ Training Speed: ~6.8s/step (consistent with other jobs)                     │
+│ Data Download: 1,522 images + 1,522 masks in ~3 min                        │
+│ Model Loading: ~2 min (FluxFill pipeline, 7 components)                     │
 │                                                                             │
-│ Epoch 1/5 — Avg Loss: 0.1670 — Duration: ~2,575s                           │
-│ Subsequent epochs in progress...                                            │
-│                                                                             │
-│ GCS Output (pending): gs://mbadas-sandbox-research-9bb9c7f/.../             │
+│ GCS Output: gs://mbadas-sandbox-research-9bb9c7f/.../                       │
 │   fluxfill_single_white_solid_20260222_201003/                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 
@@ -1902,7 +1902,7 @@ TRAINING SUMMARY TABLE
   ─────────────────────  ──────   ─────   ──────  ───────────  ──────────────────────
   single_yellow_solid      372     465      5/5   ✅ Complete   0.1653
   single_white_dashed      373     470      5/5   ✅ Complete   0.1455
-  single_white_solid     1,522   1,905      ~2/5  🔄 Running   —
+  single_white_solid     1,522   1,905      5/5   ✅ Complete   —
   double_white_solid     4,612   5,765      ~1/5  🔄 Running   —
   double_yellow_solid    6,493   8,120      ~1/5  🔄 Running   —
 
@@ -2047,14 +2047,17 @@ RESULTS: FLUXFILL LORA TRAINING (Run: 20260222_201003)
 Common hyperparameters: rank=16, alpha=16, lr=1e-5, cosine schedule,
 50 warmup steps, 5 epochs, batch=1, grad_accum=4, seed=42.
 
-Completed Jobs (2/5 at time of documentation):
+Completed Jobs (3/5):
   single_yellow_solid — 372 images, 465 steps, ~53 min
     Epoch losses: 0.186 → 0.178 → 0.165 → 0.176 → 0.165
   single_white_dashed — 373 images, 470 steps, ~53 min
     Epoch losses: 0.148 → 0.158 → 0.149 → 0.171 → 0.146
+  single_white_solid  — 1,522 images, 1,905 steps, ~3.6 hours
+    Run ID: fluxfill_single_white_solid_20260222_201003
+    Data: 1,522 images + 1,522 masks from td-chunk0-99_single_white_solid
+    Training speed: ~6.8s/step, checkpoints every 100 steps
 
-In-Progress Jobs (3/5):
-  single_white_solid  — 1,522 images, 1,905 steps, est. ~3.6 hours
+In-Progress Jobs (2/5):
   double_white_solid  — 4,612 images, 5,765 steps, est. ~10.9 hours
   double_yellow_solid — 6,493 images, 8,120 steps, est. ~15.3 hours
 
@@ -2568,22 +2571,22 @@ CONFIGURATION FILES
    Environment: RUN_ID, GCS paths, container image refs
 
 1. segmentation/sam2/Dockerfile
-   Base: pytorch/pytorch:2.1.0-cuda11.8-cudnn8-devel
+   Base: nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
    Installs: SAM2 (editable), gcsfs, hlx-wf wheel, av, decord
    Copies: workflow_sam2.py, process_videos_sam2.py, etc.
 
 1b. segmentation/sam2/docker-compose.yaml
    Services: frontend (SAM2 + transformers)
-   Build: FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-devel
+   Build: FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
    
 2. generation/VideoPainter/Dockerfile
-   Base: pytorch/pytorch:2.1.0-cuda11.8-cudnn8-devel
+   Base: nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
    Installs: custom diffusers, transformers, accelerate, peft, gcsfs
    Copies: workflow_vp.py, infer/, train/, scripts/
 
 2b. generation/VideoPainter/docker-compose.yaml
    Services: frontend (VideoPainter + diffusers)
-   Build: FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-devel
+   Build: FROM nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
    
 3. generation/VideoPainter/requirements.txt
    Key dependencies:
@@ -2598,7 +2601,7 @@ CONFIGURATION FILES
      - gcsfs
 
 4. vla/alpamayo/Dockerfile (NEW)
-   Base: nvidia/cuda:12.1.1-devel-ubuntu22.04
+   Base: nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
    Python: 3.12 (built from deadsnakes PPA)
    Installs: torch==2.8.0 (cu121), transformers==4.57.1, flash-attn>=2.8.3,
              physical_ai_av, einops, hydra-core, av, gcsfs, hlx-wf wheel

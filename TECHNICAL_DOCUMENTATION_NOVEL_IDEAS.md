@@ -105,7 +105,7 @@ None of the three upstream repositories were designed to interoperate. Each was 
 
 | File | Status | Purpose | Lines |
 |------|--------|---------|-------|
-| ★ `process_videos_sam2.py` | **New** | Complete road segmentation pipeline with 9-point grid initialization, morphological filtering, multi-format output, VP-compatible preprocessing, GCS upload | 1,118 |
+| ★ `process_videos_sam2.py` | **New** | Complete road segmentation pipeline with 6-point grid initialization, morphological filtering, multi-format output, VP-compatible preprocessing, GCS upload | 1,118 |
 | ★ `process_vide_sam2_hlxwf.py` | **New** | Cloud workflow wrapper: CLI argument parsing, global configuration injection | 67 |
 | ★ `workflow_sam2.py` | **New** | Cloud workflow: FUSE-mounted checkpoint access, chunks:// URI resolver, GCS video download, output upload | 444 |
 | ★ `data_generation.py` | **New** | FluxFill training data generation: SAM2 masks + Qwen2.5-VL captions → CSV dataset | 1,112 |
@@ -117,7 +117,7 @@ None of the three upstream repositories were designed to interoperate. Each was 
 | ★ `README_PIPELINE.md` | **New** | Pipeline-specific documentation |
 | ★ `scripts/` | **New** | Build scripts for segmentation, data generation, filtering workflows |
 
-**Key architectural difference:** Upstream SAM2 is a general-purpose segmentation model with interactive point/box prompts. The local version adds an **automated road segmentation pipeline** that uses a fixed 9-point grid optimized for front-facing vehicle cameras, produces VideoPainter-compatible output formats, and includes complete GCS integration for cloud-scale processing.
+**Key architectural difference:** Upstream SAM2 is a general-purpose segmentation model with interactive point/box prompts. The local version adds an **automated road segmentation pipeline** that uses a fixed 6-point grid optimized for front-facing vehicle cameras, produces VideoPainter-compatible output formats, and includes complete GCS integration for cloud-scale processing.
 
 ---
 
@@ -207,7 +207,7 @@ SAM2 ──(run_id)──▶ VideoPainter ──(gcs_path)──▶ Alpamayo
 SAM2 provides general-purpose segmentation with interactive prompts. Autonomous driving requires **automated road region detection** across thousands of videos without manual annotation.
 
 ### Solution
-A complete road segmentation pipeline (`process_videos_sam2.py`, 1,118 lines) that uses SAM2's video predictor with a **fixed 9-point grid** optimized for front-facing vehicle camera geometry.
+A complete road segmentation pipeline (`process_videos_sam2.py`, 1,118 lines) that uses SAM2's video predictor with a **fixed 6-point grid** optimized for front-facing vehicle camera geometry.
 
 ### Technical Details
 
@@ -599,7 +599,7 @@ All 5 jobs executed in parallel on separate A100 80GB GKE nodes. Identical hyper
 |---|-----------|--------|-------|------|----------------------|--------|
 | 1 | `single_yellow_solid` | 372 | 465 | ~53 min | 0.186 → 0.178 → 0.165 → 0.176 → **0.165** | ✅ Complete |
 | 2 | `single_white_dashed` | 373 | 470 | ~53 min | 0.148 → 0.158 → 0.149 → 0.171 → **0.146** | ✅ Complete |
-| 3 | `single_white_solid` | 1,522 | 1,905 | ~3.6 hrs | Epoch 1: 0.167 (in progress) | 🔄 Running |
+| 3 | `single_white_solid` | 1,522 | 1,905 | ~3.6 hrs | Completed (5/5 epochs) | ✅ Complete |
 | 4 | `double_white_solid` | 4,612 | 5,765 | ~10.9 hrs | (in progress) | 🔄 Running |
 | 5 | `double_yellow_solid` | 6,493 | 8,120 | ~15.3 hrs | (in progress) | 🔄 Running |
 
@@ -754,9 +754,9 @@ Four purpose-built Docker containers orchestrated through cloud workflows with G
 
 | Container | Base Image | Python | Key Dependencies | Size |
 |-----------|-----------|--------|-----------------|------|
-| SAM2 | `nvidia/cuda:12.1.1-cudnn8-runtime` | 3.10 | SAM2, Qwen2.5-VL, gcsfs, Workflow SDK | ~8 GB |
-| VideoPainter | `nvidia/cuda:12.1.1-cudnn8-devel` | 3.10 | CogVideoX, FluxFill, Diffusers, Qwen, Workflow SDK | ~15 GB |
-| Alpamayo | `nvidia/cuda:12.1.1-cudnn8-devel` | 3.12 | Alpamayo-R1, flash-attn, physical_ai_av, Workflow SDK | ~12 GB |
+| SAM2 | `nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04` | 3.10 | SAM2, Qwen2.5-VL, gcsfs, Workflow SDK | ~8 GB |
+| VideoPainter | `nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04` | 3.10 | CogVideoX, FluxFill, Diffusers, Qwen, Workflow SDK | ~15 GB |
+| Alpamayo | `nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04` | 3.12 | Alpamayo-R1, flash-attn, physical_ai_av, Workflow SDK | ~12 GB |
 | Master | `python:3.10-slim` | 3.10 | Workflow SDK, gcsfs (lightweight orchestrator) | ~500 MB |
 
 **Alpamayo Dockerfile Patch:**
@@ -797,7 +797,7 @@ Raw AD Videos (PhysicalAI-AV, GCS)
 ┌─── STAGE 1: SAM2 Segmentation ────────────────────────────┐
 │ • Download videos from GCS (gcsfs)                         │
 │ • Extract frames at 8 FPS (ffmpeg)                         │
-│ • Run SAM2 with 9-point road grid (sam2.1_hiera_large)     │
+│ • Run SAM2 with 6-point road grid (sam2.1_hiera_large)     │
 │ • Generate binary masks + NPZ archives                     │
 │ • Create VP-compatible folder structure                     │
 │ Output: gs://…/preprocessed_data_vp/<run_id>/              │
