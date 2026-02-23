@@ -1827,15 +1827,16 @@ Run ID Timestamp: 20260222_201003
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ JOB 1: single_yellow_solid                                    ✅ COMPLETE  │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ Dataset: 372 images   Total Steps: 465   Training Time: ~52.8 min          │
+│ Dataset: 372 images   Total Steps: 465   Training Time: 59.1 min (0.99h)   │
 │ Checkpoints: 100, 200, 300, 400 + final                                    │
+│ Initial Loss: 0.1236   Final Loss: 0.0806   Loss Range: 0.019–1.164       │
 │                                                                             │
-│ Per-Epoch Results:                                                          │
-│   Epoch 1/5 — Avg Loss: 0.1863 — Duration: 632.7s                          │
-│   Epoch 2/5 — Avg Loss: 0.1777 — Duration: 633.0s                          │
-│   Epoch 3/5 — Avg Loss: 0.1652 — Duration: 633.3s                          │
-│   Epoch 4/5 — Avg Loss: 0.1764 — Duration: 633.1s                          │
-│   Epoch 5/5 — Avg Loss: 0.1653 — Duration: 633.5s                          │
+│ Per-Epoch Results (source: loss_history.json):                              │
+│   Epoch 1/5 — Avg Loss: 0.1701                                             │
+│   Epoch 2/5 — Avg Loss: 0.1761                                             │
+│   Epoch 3/5 — Avg Loss: 0.1682                                             │
+│   Epoch 4/5 — Avg Loss: 0.1855                                             │
+│   Epoch 5/5 — Avg Loss: 0.1652                                             │
 │                                                                             │
 │ GCS Output: gs://mbadas-sandbox-research-9bb9c7f/.../                       │
 │   fluxfill_single_yellow_solid_20260222_201003/                             │
@@ -1844,58 +1845,77 @@ Run ID Timestamp: 20260222_201003
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ JOB 2: single_white_dashed                                    ✅ COMPLETE  │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ Dataset: 373 images   Total Steps: 470   Training Time: ~52.8 min          │
+│ Dataset: 373 images   Total Steps: 470   Training Time: 59.0 min (0.98h)   │
 │ Checkpoints: 100, 200, 300, 400 + final                                    │
+│ Initial Loss: 0.0876   Final Loss: 0.1108   Loss Range: 0.019–1.185       │
 │                                                                             │
-│ Per-Epoch Results:                                                          │
-│   Epoch 1/5 — Avg Loss: 0.1475 — Duration: 634.9s                          │
-│   Epoch 2/5 — Avg Loss: 0.1577 — Duration: 634.4s                          │
-│   Epoch 3/5 — Avg Loss: 0.1486 — Duration: 633.4s                          │
-│   Epoch 4/5 — Avg Loss: 0.1706 — Duration: 633.3s                          │
-│   Epoch 5/5 — Avg Loss: 0.1455 — Duration: 633.1s                          │
+│ Per-Epoch Results (source: loss_history.json):                              │
+│   Epoch 1/5 — Avg Loss: 0.1475                                             │
+│   Epoch 2/5 — Avg Loss: 0.1577                                             │
+│   Epoch 3/5 — Avg Loss: 0.1486                                             │
+│   Epoch 4/5 — Avg Loss: 0.1706                                             │
+│   Epoch 5/5 — Avg Loss: 0.1455                                             │
 │                                                                             │
 │ GCS Output: gs://mbadas-sandbox-research-9bb9c7f/.../                       │
 │   fluxfill_single_white_dashed_20260222_201003/                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ JOB 3: single_white_solid                                  ✅ COMPLETE     │
+│ JOB 3: single_white_solid                                     ✅ COMPLETE  │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ Dataset: 1,522 images   Total Steps: 1,905   Time: ~3.6 hours              │
+│ Dataset: 1,522 images   Total Steps: 1,905   Time: 3.68 hrs (220.8 min)   │
 │ Run ID: fluxfill_single_white_solid_20260222_201003                         │
 │ Training Speed: ~6.8s/step (consistent with other jobs)                     │
-│ Data Download: 1,522 images + 1,522 masks in ~3 min                        │
-│ Model Loading: ~2 min (FluxFill pipeline, 7 components)                     │
+│ Initial Loss: 0.0860   Final Loss: 0.2316   Loss Range: 0.012–1.188       │
+│                                                                             │
+│ Per-Epoch Results (source: loss_history.json):                              │
+│   Epoch 1/5 — Avg Loss: 0.1670                                             │
+│   Epoch 2/5 — Avg Loss: 0.1586                                             │
+│   Epoch 3/5 — Avg Loss: 0.1654                                             │
+│   Epoch 4/5 — Avg Loss: 0.1692                                             │
+│   Epoch 5/5 — Avg Loss: 0.1690                                             │
 │                                                                             │
 │ GCS Output: gs://mbadas-sandbox-research-9bb9c7f/.../                       │
 │   fluxfill_single_white_solid_20260222_201003/                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ JOB 4: double_white_solid                                  🔄 IN PROGRESS  │
+│ JOB 4: double_white_solid                                     ✅ COMPLETE  │
 ├─────────────────────────────────────────────────────────────────────────────┤
+│ Dataset: 4,612 images   Total Steps: 5,765   Time: 10.98 hrs (658.6 min)  │
 │ Run ID: fluxfill_double_white_solid_20260222_201003                         │
-│ Dataset: 4,612 images   Total Steps: 5,765   Est. Time: ~10.9 hours        │
-│ Data Download: 4,612 images (~8.5 min) + 4,612 masks (~3.5 min) = ~12 min  │
-│   Source: gs://…/training/data/td-chunk0-99_double_white_solid              │
-│ Status: Data download complete, training in progress                        │
+│ Training Speed: ~6.8s/step (consistent with other jobs)                     │
+│ Initial Loss: 0.0880   Final Loss: 0.1673   Loss Range: 0.015–1.237       │
+│ Checkpoints: 100, 200, ... 5600, 5700 + final                              │
 │                                                                             │
-│ GCS Output (pending): gs://mbadas-sandbox-research-9bb9c7f/.../             │
+│ Per-Epoch Results (source: loss_history.json):                              │
+│   Epoch 1/5 — Avg Loss: 0.1724                                             │
+│   Epoch 2/5 — Avg Loss: 0.1735                                             │
+│   Epoch 3/5 — Avg Loss: 0.1701                                             │
+│   Epoch 4/5 — Avg Loss: 0.1712                                             │
+│   Epoch 5/5 — Avg Loss: 0.1672                                             │
+│                                                                             │
+│ GCS Output: gs://mbadas-sandbox-research-9bb9c7f/.../                       │
 │   fluxfill_double_white_solid_20260222_201003/                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ JOB 5: double_yellow_solid                                 🔄 IN PROGRESS  │
+│ JOB 5: double_yellow_solid                                    ✅ COMPLETE  │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ Dataset: 6,493 images   Total Steps: 8,120   Est. Time: ~15.3 hours        │
-│ Status: ~5% complete (epoch 1, step 390/8120)                               │
+│ Dataset: 6,493 images   Total Steps: 8,120   Time: 15.43 hrs (925.8 min)  │
+│ Run ID: fluxfill_double_yellow_solid_20260222_201003                        │
+│ Training Speed: ~6.8s/step (consistent with other jobs)                     │
+│ Initial Loss: 0.1610   Final Loss: 0.1590   Loss Range: 0.012–1.176       │
+│ Checkpoints: 100, 200, ... 8000, 8100 + final                              │
 │                                                                             │
-│ Early loss samples (epoch 1):                                               │
-│   step 10: 0.1223   step 100: 0.0688   step 200: 0.0388                    │
-│   step 300: 0.0792  step 390: 0.1690                                        │
-│ Checkpoints saved: 100, 200, 300                                            │
+│ Per-Epoch Results (source: loss_history.json):                              │
+│   Epoch 1/5 — Avg Loss: 0.1644                                             │
+│   Epoch 2/5 — Avg Loss: 0.1589                                             │
+│   Epoch 3/5 — Avg Loss: 0.1593                                             │
+│   Epoch 4/5 — Avg Loss: 0.1577                                             │
+│   Epoch 5/5 — Avg Loss: 0.1570                                             │
 │                                                                             │
-│ GCS Output (pending): gs://mbadas-sandbox-research-9bb9c7f/.../             │
+│ GCS Output: gs://mbadas-sandbox-research-9bb9c7f/.../                       │
 │   fluxfill_double_yellow_solid_20260222_201003/                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 
@@ -1903,17 +1923,19 @@ TRAINING SUMMARY TABLE
 ──────────────────────
   Job                    Images   Steps   Epochs  Status       Avg Loss (final epoch)
   ─────────────────────  ──────   ─────   ──────  ───────────  ──────────────────────
-  single_yellow_solid      372     465      5/5   ✅ Complete   0.1653
+  single_yellow_solid      372     465      5/5   ✅ Complete   0.1652
   single_white_dashed      373     470      5/5   ✅ Complete   0.1455
-  single_white_solid     1,522   1,905      5/5   ✅ Complete   —
-  double_white_solid     4,612   5,765      ~1/5  🔄 Running   —
-  double_yellow_solid    6,493   8,120      ~1/5  🔄 Running   —
+  single_white_solid     1,522   1,905      5/5   ✅ Complete   0.1690
+  double_white_solid     4,612   5,765      5/5   ✅ Complete   0.1672
+  double_yellow_solid    6,493   8,120      5/5   ✅ Complete   0.1570
 
 OBSERVATIONS FROM COMPLETED TRAINING
 ─────────────────────────────────────
-1. Loss Convergence: Both completed jobs show loss stabilization by epoch 3,
-   with final-epoch averages of 0.145–0.165. Loss fluctuation within each epoch
-   is expected due to the flow matching objective (random timestep sampling).
+1. Loss Convergence: All 5 jobs show loss stabilization by epoch 3,
+   with final-epoch averages in the range 0.145–0.169 (single_white_dashed
+   lowest at 0.1455; single_white_solid highest at 0.1690). Loss
+   fluctuation within each epoch is expected due to the flow matching objective
+   (random timestep sampling).
 
 2. Training Speed: Consistent ~6.8s per step on A100 80GB, giving ~635s per
    epoch for ~370-image datasets (93 steps/epoch with batch=1, grad_accum=4).
@@ -1924,8 +1946,8 @@ OBSERVATIONS FROM COMPLETED TRAINING
 4. Data Download: Image/mask downloading from GCS scales linearly with
    dataset size. Measured download times:
    - single_white_solid (1,522 images + 1,522 masks): ~3 min total
-   - double_white_solid (4,612 images + 4,612 masks): ~12 min total
-     (images: ~8.5 min at ~100 files/7.5s; masks: ~3.5 min at ~100 files/4.7s)
+   - double_white_solid (4,612 images + 4,612 masks): ~9.1 min total
+     (images: ~5.6 min at ~100 files/7.3s; masks: ~3.5 min at ~100 files/4.6s)
    - double_yellow_solid (6,493 images + 6,493 masks): ~5 min for masks
      at ~100 files per 4.5 seconds.
 
@@ -2054,23 +2076,17 @@ RESULTS: FLUXFILL LORA TRAINING (Run: 20260222_201003)
 Common hyperparameters: rank=16, alpha=16, lr=1e-5, cosine schedule,
 50 warmup steps, 5 epochs, batch=1, grad_accum=4, seed=42.
 
-Completed Jobs (3/5):
-  single_yellow_solid — 372 images, 465 steps, ~53 min
-    Epoch losses: 0.186 → 0.178 → 0.165 → 0.176 → 0.165
-  single_white_dashed — 373 images, 470 steps, ~53 min
-    Epoch losses: 0.148 → 0.158 → 0.149 → 0.171 → 0.146
-  single_white_solid  — 1,522 images, 1,905 steps, ~3.6 hours
-    Run ID: fluxfill_single_white_solid_20260222_201003
-    Data: 1,522 images + 1,522 masks from td-chunk0-99_single_white_solid
-    Training speed: ~6.8s/step, checkpoints every 100 steps
-
-In-Progress Jobs (2/5):
-  double_white_solid  — 4,612 images, 5,765 steps, est. ~10.9 hours
-    Run ID: fluxfill_double_white_solid_20260222_201003
-    Data: 4,612 images + 4,612 masks from td-chunk0-99_double_white_solid
-    Data download: ~12 min (images ~8.5 min at ~100 files/7.5s, masks ~3.5 min at ~100 files/4.7s)
-    Training speed: ~6.8s/step, checkpoints every 100 steps
-  double_yellow_solid — 6,493 images, 8,120 steps, est. ~15.3 hours
+All Jobs Complete (5/5):
+  single_yellow_solid — 372 images, 465 steps, 59.1 min (0.99h)
+    Epoch losses: 0.1701 → 0.1761 → 0.1682 → 0.1855 → 0.1652
+  single_white_dashed — 373 images, 470 steps, 59.0 min (0.98h)
+    Epoch losses: 0.1475 → 0.1577 → 0.1486 → 0.1706 → 0.1455
+  single_white_solid  — 1,522 images, 1,905 steps, 3.68 hours
+    Epoch losses: 0.1670 → 0.1586 → 0.1654 → 0.1692 → 0.1690
+  double_white_solid  — 4,612 images, 5,765 steps, 10.98 hours
+    Epoch losses: 0.1724 → 0.1735 → 0.1701 → 0.1712 → 0.1672
+  double_yellow_solid — 6,493 images, 8,120 steps, 15.43 hours
+    Epoch losses: 0.1644 → 0.1589 → 0.1593 → 0.1577 → 0.1570
 
 RESULTS: PIPELINE INFERENCE (Run 006, SAM2 Run 006_20260219_135038)
 ────────────────────────────────────────────────────────────────────
@@ -2103,7 +2119,7 @@ Prompts tested:
 
 Variants:
   100frames = Original pipeline, max 100 frames per video
-  vps90     = 90% video processed split
+  vps90     = VideoPainter strength 0.90
 
 ── SAM2 SEGMENTATION RESULTS (Stage 1) ──
 

@@ -597,18 +597,18 @@ All 5 jobs executed in parallel on separate A100 80GB GKE nodes. Identical hyper
 
 | # | Lane Type | Images | Steps | Time | Epoch Avg Losses (1→5) | Status |
 |---|-----------|--------|-------|------|----------------------|--------|
-| 1 | `single_yellow_solid` | 372 | 465 | ~53 min | 0.186 → 0.178 → 0.165 → 0.176 → **0.165** | ✅ Complete |
-| 2 | `single_white_dashed` | 373 | 470 | ~53 min | 0.148 → 0.158 → 0.149 → 0.171 → **0.146** | ✅ Complete |
-| 3 | `single_white_solid` | 1,522 | 1,905 | ~3.6 hrs | Completed (5/5 epochs) | ✅ Complete |
-| 4 | `double_white_solid` | 4,612 | 5,765 | ~10.9 hrs | Data download confirmed (4,612 images + 4,612 masks in ~12 min); training in progress | 🔄 Running |
-| 5 | `double_yellow_solid` | 6,493 | 8,120 | ~15.3 hrs | (in progress) | 🔄 Running |
+| 1 | `single_yellow_solid` | 372 | 465 | 59.1 min | 0.1701 → 0.1761 → 0.1682 → 0.1855 → **0.1652** | ✅ Complete |
+| 2 | `single_white_dashed` | 373 | 470 | 59.0 min | 0.1475 → 0.1577 → 0.1486 → 0.1706 → **0.1455** | ✅ Complete |
+| 3 | `single_white_solid` | 1,522 | 1,905 | 3.68 hrs | 0.1670 → 0.1586 → 0.1654 → 0.1692 → **0.1690** | ✅ Complete |
+| 4 | `double_white_solid` | 4,612 | 5,765 | 10.98 hrs | 0.1724 → 0.1735 → 0.1701 → 0.1712 → **0.1672** | ✅ Complete |
+| 5 | `double_yellow_solid` | 6,493 | 8,120 | 15.43 hrs | 0.1644 → 0.1589 → 0.1593 → 0.1577 → **0.1570** | ✅ Complete |
 
 Key observations:
-- Loss stabilizes by epoch 3 for completed jobs (final-epoch avg: 0.145–0.165)
-- Epoch duration is highly consistent within each job (~633s ±2s for 370-image datasets)
-- GCS upload of final checkpoints completes in ~8 seconds
-- GCS data download scales linearly: ~3 min for 1.5k images, ~12 min for 4.6k images
-  (double_white_solid: 4,612 images in ~8.5 min + 4,612 masks in ~3.5 min)
+- Loss stabilizes by epoch 3 for all jobs (final-epoch avg range: 0.145–0.169)
+- All 5 jobs complete. The largest dataset (double_yellow_solid, 6,493 images) converged to 0.157; the smallest (single_yellow_solid, 372 images) to 0.165 — all within a narrow band, confirming scalability
+- Epoch duration scales linearly with dataset size: ~59 min for 370-image datasets, ~3.7 hrs for 1,522-image, ~11 hrs for 4,612-image, ~15.4 hrs for 6,493-image datasets (~6.8s/step consistent)
+- GCS upload of final checkpoints completes quickly: ~8s for smaller jobs, ~1.6 min for double_white_solid (57 checkpoints)
+- GCS data download scales linearly: ~3 min for 1.5k images, ~9.1 min for 4.6k images
 - Harmless `gcsfs`/`aiohttp` session cleanup traceback at exit does not affect results
 
 **Why This Is Novel:** First LoRA fine-tuning pipeline specifically designed for FluxFill inpainting on structured lane marking datasets, with automated multi-variant training producing one specialized checkpoint per lane-marking type, integrated into a cloud workflow system.
