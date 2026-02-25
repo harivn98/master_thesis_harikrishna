@@ -80,10 +80,59 @@ None of the three upstream repositories were designed to interoperate. Each was 
 | ★ `data_unprocessed/` | **New** | Intermediate processing data (frames/, segmentation_mask/) |
 | ★ `ckpt/` | **New** | Checkpoint directories (CLIP ViT-L/14, CogVideoX-5b-I2V, SDXL inpaint) |
 | `infer/edit_bench.py` | **Modified** | FluxFill pipeline integration, VLM refinement loop, multi-GPU orchestration, mask dilation/feathering |
-| `train/train_fluxfill_inpaint_lora.py` | **Modified** | LoRA fine-tuning for FluxFill on lane-marking CSVs |
-| `diffusers/` | **Modified** | Bug fixes (missing `outputs.py`), custom patches for CogVideoX |
+| `train/train_fluxfill_inpaint_lora.py` | **New** | LoRA fine-tuning for FluxFill on lane-marking CSVs |
+| `diffusers/loaders/lora_conversion_utils.py` | **Modified** | BFL Flux Control LoRA state dict converter (+14 lines) |
+| `diffusers/loaders/lora_pipeline.py` | **Modified** | Manual PEFT adapter injection for FluxFill LoRA (+50 lines) |
 
 **Key architectural difference:** Upstream VideoPainter runs only CogVideoX for video inpainting. The local version introduces a **dual-model pipeline** (FluxFill → CogVideoX) where FluxFill generates a high-quality semantically-correct first frame, and CogVideoX propagates the edit temporally across all subsequent frames.
+
+#### Line-by-Line File Comparison (verified February 24, 2026)
+
+A recursive `diff -rq` comparison was performed between the upstream TencentARC/VideoPainter repository and the local `generation/VideoPainter` directory. Binary assets (`.mp4`, `.jpg`, `.png`, `.so`), `.git/`, `__pycache__/`, and runtime data directories (`ckpt/`, `data_1/`, `data_unprocessed/`) were excluded.
+
+**Result: 688 of 696 upstream source files are byte-identical. 8 files modified, 13 files added, 0 files deleted.**
+
+##### Modified Files (8 files, ~1,300 lines changed)
+
+| File | Upstream Lines | Local Lines | Delta | Nature of Change |
+|------|---------------|-------------|-------|-----------------|
+| `infer/edit_bench.py` | 700 | 1,787 | **+1,087** | OpenAI API → local Qwen2.5-VL; FluxFill dual-model integration; two-phase GPU execution; iterative caption refinement; border-aware masking; mask dilation/feathering; domain-specific prompts; LoRA adapter loading; multi-GPU device routing |
+| `evaluate/metrics.py` | 903 | 1,125 | **+222** | OpenAI API → local Qwen2.5-VL; `clip` package → HuggingFace CLIPModel with local checkpoint; `compute_all_metrics()` single-pass method; conditional cogvlm2 loading with graceful fallback |
+| `infer/inpaint.py` | 601 | 665 | **+64** | OpenAI → Qwen2.5-VL migration; FluxFill LoRA loading support; FPS calculation fix |
+| `infer/edit.py` | 641 | 688 | **+47** | OpenAI → Qwen2.5-VL migration; FPS calculation fix |
+| `diffusers/.../lora_pipeline.py` | 2,828 | 2,878 | **+50** | Manual PEFT inject_adapter_in_model() replacing broken load_lora_adapter(); LoRA rank extraction; DoRA version check; CPU offload hook management |
+| `diffusers/.../lora_conversion_utils.py` | 623 | 637 | **+14** | BFL Flux Control LoRA state dict pass-through converter for norm layer keys |
+| `requirements.txt` | 42 | 45 | **+3** | `openai` removed; `qwen-vl-utils` added; `transformers` upgraded to v4.49.0 for Qwen2.5-VL; version pins tightened |
+| `infer/edit_bench.sh` | 97 | 97 | **0** | LLM model identifier changed (cosmetic) |
+
+##### New Files (13 files, ~4,200 lines)
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `workflow_vp.py` | 1,619 | HLX cloud workflow orchestrator: GCS FuseBucket mounts for 5 checkpoints, per-video folder consumption, multi-instruction editing, structured result upload |
+| `scripts/build_and_run.sh` | 181 | Docker build/tag/push + HLX workflow submission for inference |
+| `scripts/build_and_run_training.sh` | 110 | Docker build/tag/push for LoRA training |
+| `scripts/build_and_run_training_all.sh` | 152 | Parallel LoRA training for all 5 lane marking types |
+| `scripts/download_physicalai_data.sh` | 118 | PhysicalAI-AV dataset download utility |
+| `train/train_fluxfill_inpaint_lora.py` | 605 | Complete FluxFill LoRA fine-tuning: CSV dataset, Accelerate, PEFT LoraConfig, gradient accumulation, cosine LR, safetensors checkpointing |
+| `data_utils/build_fluxfill_inpaint_csv.py` | 488 | Training dataset CSV builder with auto-captioning and mask generation |
+| `training_workflow.py` | 359 | HLX cloud workflow for LoRA training: GCS data staging, training subprocess, checkpoint upload |
+| `infer/border_utils.py` | 154 | Border-aware masking (cv2.inpaint/blur) to prevent black-fill artifacts during camera movement |
+| `Dockerfile` | 95 | CUDA 12.1 production container with Qwen2.5-VL, Diffusers, workflow SDK, pre-cached eval models |
+| `docker-compose.yaml` | 30 | Local dev configuration with GPU passthrough, 16 GB shm |
+| `.dockerignore` | 2 | Excludes ckpt/, data_1/, data_unprocessed/ from build context |
+
+##### Unchanged Files (688 files)
+
+All files in the following directories are byte-identical to upstream:
+- `app/` — Gradio demo application including bundled SAM 2 library (all files)
+- `assets/` — Method diagrams, demo videos
+- `data_utils/VPData_download.py`, `data_utils/unzip_folder.py`
+- `diffusers/` — Entire vendored Diffusers library **except** the 2 LoRA loader files above
+- `evaluate/` — All evaluation scripts **except** metrics.py
+- `infer/` — Shell scripts (inpaint.sh, edit.sh, inpaint_id_resample.sh) unchanged
+- `train/` — All upstream training scripts (VideoPainter.sh, VideoPainterID.sh, accelerate configs, mask_process.py, CogVideoX trainers)
+- `env.sh`, `LICENSE`, `README.md`, `.gitignore`
 
 ---
 
@@ -101,23 +150,78 @@ None of the three upstream repositories were designed to interoperate. Each was 
 | `tools/` | Benchmarking utilities |
 | `sav_dataset/` | SA-V dataset utilities |
 
-**Local additions (all novel):**
+#### Line-by-Line File Comparison (verified February 24, 2026)
+
+**Files IDENTICAL to upstream facebookresearch/sam2 (0 lines modified):**
+
+| File | Lines | Verification |
+|------|-------|-------------|
+| `sam2/build_sam.py` | — | 100% byte-identical. build_sam2(), build_sam2_video_predictor(), HF loading, checkpoint loading — all unchanged |
+| `sam2/sam2_video_predictor.py` | 1,224 | 100% byte-identical. SAM2VideoPredictor class, SAM2VideoPredictorVOS with torch.compile — all unchanged |
+| `sam2/sam2_image_predictor.py` | 467 | 100% byte-identical. set_image(), predict(), backbone feature sizes — all unchanged |
+| `sam2/sam2_video_predictor_legacy.py` | — | 100% identical |
+| `sam2/automatic_mask_generator.py` | — | 100% identical |
+| `sam2/benchmark.py` | — | 100% identical |
+| `sam2/__init__.py` | — | 100% identical |
+| `sam2/configs/` (all YAML files) | — | All sam2 and sam2.1 configs unchanged |
+| `sam2/csrc/` (CUDA C++ code) | — | connected_components.cu — unchanged |
+| `sam2/modeling/` (all model code) | — | SAM2Base, memory encoder/attention, position encoding, Hiera backbone — all unchanged |
+| `sam2/utils/` (all utilities) | — | misc.py, transforms.py — all unchanged |
+| `setup.py` | 175 | 100% identical. Same REQUIRED_PACKAGES, EXTRA_PACKAGES, CUDA extension build logic |
+| `pyproject.toml` | — | 100% identical. Same build-system requirements |
+| `tools/vos_inference.py` | 508 | 100% identical. vos_inference(), DAVIS palette, mask utilities — unchanged |
+| `backend.Dockerfile` | — | 100% identical. pytorch/pytorch base, Gunicorn, SAM 2.1 checkpoint downloads — unchanged |
+| `training/` (entire directory) | — | All fine-tuning code unchanged |
+| `notebooks/` (entire directory) | — | All Jupyter notebooks unchanged |
+| `sav_dataset/` (entire directory) | — | All SA-V dataset utilities unchanged |
+| All license/contributing/docs files | — | CODE_OF_CONDUCT.md, CONTRIBUTING.md, INSTALL.md, LICENSE, MANIFEST.in, README.md, RELEASE_NOTES.md — all unchanged |
+
+> **Key finding:** The SAM2 core library (model architecture, predictors, configs, training code, CUDA extensions) is 100% unmodified. Not a single line of Meta's code was changed.
+
+**File REWRITTEN (original functionality completely replaced):**
+
+| File | Original Purpose | Local Purpose |
+|------|-----------------|---------------|
+| `docker-compose.yaml` | 2-service web demo (React frontend + Gunicorn backend) with port 7262/7263, 1 GPU, demo data volume | Single-service batch processing container with all GPUs, 16GB shared memory, full repo mount, /bin/bash entry, PYTHONPATH/HuggingFace env vars |
+
+Detailed docker-compose.yaml comparison:
+
+| Aspect | Original (upstream) | Local (rewritten) |
+|--------|-------------------|-------------------|
+| Services | `frontend` + `backend` (2 services) | Single `frontend` (batch worker) |
+| Frontend | React app on port 7262 | SAM2 batch container |
+| Backend | Gunicorn API on port 7263 | **Removed entirely** |
+| GPU | 1 GPU for backend only | **All GPUs** |
+| Volumes | `./demo/data/:/data/` | `./:/workspace/sam2` (full repo) |
+| Environment | `VIDEO_ENCODE_CONCURRENCY`, API URLs | `HF_HOME`, `PYTHONPATH`, `SAM2_BUILD_CUDA=0` |
+| shm_size | Not set | **16g** |
+| IPC mode | Not set | **host** |
+| Dockerfile ref | `backend.Dockerfile` + `demo/frontend/Dockerfile` | `Dockerfile` (new batch container) |
+| Command | Gunicorn server start | `/bin/bash` (interactive) |
+
+**Local additions (all novel — total ~5,390 lines of new code):**
 
 | File | Status | Purpose | Lines |
 |------|--------|---------|-------|
-| ★ `process_videos_sam2.py` | **New** | Complete road segmentation pipeline with 6-point grid initialization, morphological filtering, multi-format output, VP-compatible preprocessing, GCS upload | 1,118 |
-| ★ `process_vide_sam2_hlxwf.py` | **New** | Cloud workflow wrapper: CLI argument parsing, global configuration injection | 67 |
-| ★ `workflow_sam2.py` | **New** | Cloud workflow: FUSE-mounted checkpoint access, chunks:// URI resolver, GCS video download, output upload | 444 |
-| ★ `data_generation.py` | **New** | FluxFill training data generation: SAM2 masks + Qwen2.5-VL captions → CSV dataset | 1,112 |
-| ★ `filter_fluxfill_dataset.py` | **New** | Lane-attribute filtering: regex-based prompt parsing, multi-field filtering, GCS I/O | 725 |
-| ★ `Dockerfile` | **New** | CUDA 12.1 container with SAM2, Qwen VLM, gcsfs, workflow SDK | 92 |
-| ★ `docker-compose.yaml` | **New** | Container orchestration |
-| ★ `workflow_sdk.whl` | **New** | Cloud workflow SDK |
-| ★ `OPTIMIZATION_SUMMARY.md` | **New** | Performance optimization notes |
-| ★ `README_PIPELINE.md` | **New** | Pipeline-specific documentation |
-| ★ `scripts/` | **New** | Build scripts for segmentation, data generation, filtering workflows |
+| ★ `process_videos_sam2.py` | **New** | Complete road segmentation pipeline with 6-point grid initialization, 4-stage morphological filtering, multi-format output (PNG + NPZ + overlay video), VP-compatible preprocessing, parallel GCS upload (8 threads), adaptive GPU precision, in-memory mask pass-through, timing report generation | 1,122 |
+| ★ `process_vide_sam2_hlxwf.py` | **New** | Cloud workflow wrapper: CLI argument parsing, global configuration injection via exec() | 67 |
+| ★ `workflow_sam2.py` | **New** | Cloud workflow: HLX @task/@workflow, GCS FuseBucket checkpoint mounting, chunks:// URI resolver, A100 80GB allocation, 3-day max duration | 444 |
+| ★ `data_generation.py` | **New** | FluxFill training data generation: SAM2 image predictor masks + Qwen2.5-VL-7B batch captioning, multi-GPU subprocess workers (spawn context), chunk-based pipeline with prefetch, lane prompt normalization, GPU fault isolation | 1,432 |
+| ★ `filter_fluxfill_dataset.py` | **New** | Lane-attribute filtering: regex-based prompt parsing, multi-field count/color/pattern filtering, REQUIRE_CLEAR_ROAD quality gate, GCS + local I/O | 751 |
+| ★ `workflow_framesextraction.py` | **New** | Parallel frame extraction: 28-worker CPU extraction, chunk-by-chunk download/process/upload, deterministic naming | 344 |
+| ★ `workflow_datasplitting.py` | **New** | Data splitting: N-way equal split, GCS folder discovery, remainder distribution | 306 |
+| ★ `Dockerfile` | **New** | CUDA 12.1 batch container with Python 3.10, SAM2, Qwen VLM deps, gcsfs, HLX SDK (92 lines). NOT in upstream — upstream only has `backend.Dockerfile` for demo server | 92 |
+| ★ `docker-compose.yaml` | **Rewritten** | Batch container orchestration (see table above) | 30 |
+| ★ `hlx_wf-2.4.2.dev9-py3-none-any.whl` | **New** | HLX workflow SDK binary | — |
+| ★ `OPTIMIZATION_SUMMARY.md` | **New** | Documents multi-GPU caching, threading→multiprocessing switch, prefetch pipeline | 160 |
+| ★ `README_PIPELINE.md` | **New** | SAM2→VP pipeline documentation, output structure, run identifier examples | 160 |
+| ★ `scripts/build_and_run.sh` | **New** | SAM2 build/deploy: GCS config, chunk URI encoding, Docker tagging, HLX submit | 159 |
+| ★ `scripts/build_and_run_framesextraction.sh` | **New** | Frame extraction build script | ~80 |
+| ★ `scripts/build_and_run_sorting_data.sh` | **New** | Data sorting/filtering build script | ~80 |
+| ★ `scripts/build_and_run_splitdata.sh` | **New** | Data splitting build script | ~60 |
+| ★ `scripts/build_and_run_training_data.sh` | **New** | Training data generation build script | ~80 |
 
-**Key architectural difference:** Upstream SAM2 is a general-purpose segmentation model with interactive point/box prompts. The local version adds an **automated road segmentation pipeline** that uses a fixed 6-point grid optimized for front-facing vehicle cameras, produces VideoPainter-compatible output formats, and includes complete GCS integration for cloud-scale processing.
+**Key architectural difference:** Upstream SAM2 is a general-purpose segmentation model with interactive point/box prompts. The local version adds an **automated road segmentation pipeline** that uses a fixed 6-point grid optimized for front-facing vehicle cameras, produces VideoPainter-compatible output formats, and includes complete GCS integration for cloud-scale processing. The upstream SAM2 core library is used as an **unmodified dependency** — no model code was changed.
 
 ---
 
@@ -127,35 +231,76 @@ None of the three upstream repositories were designed to interoperate. Each was 
 
 | Directory | Upstream Purpose |
 |-----------|-----------------|
-| `src/alpamayo_r1/` | Model code: VLA architecture, diffusion trajectory head, geometry, action space |
-| `notebooks/` | Interactive inference notebook |
+| `src/alpamayo_r1/` | Model code: VLA architecture, diffusion trajectory head, geometry, action space (19 files) |
+| `notebooks/` | Interactive inference notebook (`inference.ipynb`) + clip ID parquet |
 | `pyproject.toml`, `uv.lock` | Dependency management (Python 3.12 + uv) |
+| `CONTRIBUTING.md`, `LICENSE`, `README.md` | Project documentation |
 
 Upstream's `test_inference.py` loads a single clip from NVIDIA's PhysicalAI-AV dataset and runs forward inference producing trajectory predictions. It has **no** support for processing edited videos, no batch processing, no visualization, and no evaluation metrics.
 
-**Local additions (all novel):**
+**Comparison methodology:** `diff -rq` on all files, byte-level comparison of each `src/` file, comparison performed February 2026.
 
-| File | Status | Purpose | Lines |
-|------|--------|---------|-------|
-| ★ `run_inference.py` | **New** | VP→Alpamayo bridge: filename parsing, frame replacement, dual-inference (original vs. generated), minADE computation, NPZ/JSON output, overlay+comparison video rendering | ~470 |
-| ★ `workflow_alpamayo.py` | **New** | Cloud workflow: FUSE-mounted checkpoints + video data, batch video discovery, model loading once, per-video inference loop, GCS upload, aggregate reporting | 573 |
-| ★ `visualize_video.py` | **New** | Trajectory rendering: pinhole projection, BEV inset, progressive reveal, camera-yaw-aware ego→cam transform, side-by-side comparison videos | ~530 |
-| ★ `download_checkpoints.py` | **New** | Checkpoint download utility |
-| ★ `Dockerfile` | **New** | Python 3.12, CUDA 12.1, flash-attn, physical_ai_av patch, workflow SDK | ~100 |
-| ★ `docker-compose.yaml` | **New** | Container orchestration |
-| ★ `README_DOCKER.md` | **New** | Docker-specific documentation |
-| ★ `workflow_sdk.whl` | **New** | Cloud workflow SDK |
-| ★ `checkpoints/` | **New** | Model checkpoint directory |
-| ★ `npz/` | **New** | Visualization data archives |
-| ★ `scripts/` | **New** | Build and run scripts |
+**Summary statistics:**
 
-**Key architectural difference:** Upstream Alpamayo runs inference on raw PhysicalAI-AV dataset clips. The local version creates a **VideoPainter-to-Alpamayo data bridge** that:
-1. Parses clip_id and camera_name from VP output filenames
-2. Loads the original clip's multi-camera frames + ego-motion from PhysicalAI-AV
-3. Replaces exactly one camera's frames with VideoPainter-edited frames
-4. Runs inference **twice** (original and generated) for A/B comparison
-5. Computes minADE against ground-truth trajectories
-6. Renders overlay and side-by-side comparison videos
+| Metric | Value |
+|--------|-------|
+| Upstream source files | 27 |
+| Local files (excl. cache, checkpoints, .whl, .npz) | 37 |
+| Byte-identical files | 25 (all 19 `src/` + 6 shared non-src) |
+| Modified files | 2 (trivial: `.gitignore`, `pyproject.toml`) |
+| New files | 10 |
+| Novel code volume | ~3,900 lines |
+| Core library changes | **0 lines** (100% identical) |
+
+**Identical files (25):** All 19 files in `src/alpamayo_r1/` are byte-identical to upstream:
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `models.py` | VLA architecture | Alpamayo-R1 model definition |
+| `diffusion.py` | Diffusion trajectory head | Denoising trajectory prediction |
+| `geometry.py` | Geometry utilities | Coordinate transforms, ego-motion |
+| `action_space.py` | Action space | Trajectory action parameterisation |
+| `config.py` | Configuration | Model hyperparameters, dataclasses |
+| `helper.py` | Helper utilities | Common functions |
+| `load_physical_aiavdataset.py` | Dataset loader | PhysicalAI-AV clip loading |
+| `test_inference.py` | Test script | Single-clip inference demo |
+| All remaining `src/` files | — | Package init, type stubs, etc. |
+
+Plus 6 shared non-src files: `CONTRIBUTING.md`, `LICENSE`, `README.md`, `notebooks/clip_ids.parquet`, `notebooks/inference.ipynb`, `uv.lock` — all byte-identical.
+
+**Modified files (2):**
+
+| File | Change | Detail |
+|------|--------|--------|
+| `.gitignore` | +1 entry | Added `checkpoints/` to ignore list |
+| `pyproject.toml` | +2 deps | Added `opencv-python-headless>=4.8.0` (frame rendering for `visualize_video.py`) and `psutil>=5.9.0` (memory tracking for `run_inference.py`) |
+
+**New files (10 files, ~3,900 lines total):**
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| ★ `run_inference.py` | 640 | **VP→Alpamayo data bridge:** parses `_edited_` token from VP filenames to extract clip_id + camera_name, loads original multi-camera frames + ego-motion from PhysicalAI-AV, replaces single camera's frames with VP-edited frames (bilinear resize to 576×1024), runs dual-pass inference (original vs. generated), computes minADE against ground-truth, outputs structured JSON (trajectories, minADE, chain-of-thought, timing, GPU/RAM usage via nvidia-smi + psutil) + NPZ (full tensor data for offline re-rendering) |
+| ★ `workflow_alpamayo.py` | 583 | **HLX cloud workflow:** GCS FuseBucket mounts for Alpamayo-R1-10B checkpoint + VP output data, in-process model reuse (load once → infer all videos), `VLAVideoMetrics` dataclass, sequential per-video processing loop, aggregate report (avg/best/worst minADE, total time, peak resources), structured GCS upload |
+| ★ `visualize_video.py` | 964 | **Trajectory renderer:** pinhole camera projection with ego→cam transform (x_cam=−y_ego, y_cam=−z_ego, z_cam=x_ego), focal length f_x=(W/2)/tan(FOV/2), ground-truth in red + predictions in cyan, BEV inset (250×250 px), progressive reveal animation, side-by-side original-vs-edited comparison, camera-yaw-aware transforms, H.264 encoding via PyAV |
+| ★ `download_checkpoints.py` | 30 | HuggingFace Hub `snapshot_download` for Alpamayo-R1-10B weights |
+| ★ `Dockerfile` | 105 | CUDA 12.1.1, Python 3.12, PyTorch 2.8+cu121, flash-attention, HLX SDK; includes `sed` monkey-patch for `physical_ai_av` library's `.to_numpy()` read-only Arrow array bug (wraps with `np.array()` to produce writable copies for `scipy.spatial.transform`) |
+| ★ `docker-compose.yaml` | 29 | GPU passthrough, 16 GB shm_size, Jupyter port 8888 |
+| ★ `.dockerignore` | 55 | Excludes checkpoints/, npz/, __pycache__/ from build context |
+| ★ `README_DOCKER.md` | 137 | Container build, configuration, and execution documentation |
+| ★ `scripts/build_and_run.sh` | 179 | Docker build → tag → push to Artifact Registry → HLX workflow submission for Stage 3 |
+| ★ `notebooks/visualize_results.ipynb` | 1,171 | Interactive Jupyter notebook for trajectory visualisation and result exploration |
+
+**Key architectural difference:** Upstream Alpamayo runs inference on raw PhysicalAI-AV dataset clips via an interactive notebook. The local version creates a **VideoPainter-to-Alpamayo data bridge** that:
+1. Parses `clip_id` and `camera_name` from VP output filenames via `_edited_` token protocol
+2. Loads the original clip's multi-camera frames + ego-motion from PhysicalAI-AV dataset
+3. Replaces exactly one camera's frames with VideoPainter-edited frames (bilinear resize to model resolution)
+4. Blacks out non-target cameras to isolate the visual effect of the single edited camera
+5. Runs inference **twice** (original and generated) under identical conditions for controlled A/B comparison
+6. Computes minADE against ground-truth trajectories for both passes
+7. Renders overlay and side-by-side comparison videos with trajectory projections
+8. Produces structured JSON + NPZ outputs for quantitative analysis
+
+**Comparison with other stages:** The Alpamayo core is 100% unmodified (matching the SAM 2 pattern from Section 2.2), unlike VideoPainter where 8 files required modification. All three stages share the same architectural philosophy: unmodified foundation model + novel application/infrastructure layer. Combined novel code: SAM 2 (~5,390 lines) + VideoPainter (~5,500 lines) + Alpamayo (~3,900 lines) ≈ **14,800 lines** of thesis-specific engineering.
 
 ---
 

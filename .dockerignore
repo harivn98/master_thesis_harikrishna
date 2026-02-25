@@ -14,8 +14,11 @@ venv/
 env/
 ENV/
 
+
+original/
 results/
 thesis_writing/
+diagrams/
 
 # IDE
 .vscode/

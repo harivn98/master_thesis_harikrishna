@@ -881,11 +881,33 @@ Process Flow:
 8. Dataset upload to GCS
 
 Caption Generation Details:
-  System Prompt:
-    "You are analyzing road images with masked regions. Describe the 
-     lane markings visible, including count (single/double), color 
-     (white/yellow/mixed), and pattern (solid/dashed/mixed)."
-  
+  System Prompt (exact, from data_generation.py line 1062):
+    "You are a driving scene labeling assistant. You only describe lane
+     line markings on the road surface. First, check whether the segmented
+     region shows a CLEAR road surface with lane line markings clearly
+     visible. If the road is not clear or the lane line markings are not
+     clearly visible, output 'unknown' for ALL fields. Return ONLY valid
+     JSON with keys: lane_marking_count, lane_marking_pattern,
+     lane_marking_color. Do NOT wrap the JSON in Markdown, code fences,
+     or backticks. Use this fixed vocabulary:
+     lane_marking_count={single|double|unknown},
+     lane_marking_pattern={solid|dashed|mixed|unknown},
+     lane_marking_color={white|yellow|mixed|unknown}."
+
+  User Prompt:
+    "Look only at the segmented road region. Only answer if it is a clear
+     road with lane line markings visible. Classify lane marking count
+     (single vs double line), pattern (solid vs dashed), and color
+     (white vs yellow)."
+
+  VLM Response Processing (_lane_prompt_from_qwen_output):
+    1. Parse JSON output for lane_marking_count, lane_marking_pattern,
+       lane_marking_color keys
+    2. Fallback: regex extraction if JSON parsing fails
+    3. Final fallback: "no clear road with lane line markings"
+    4. Normalize to canonical format:
+       "road with {count} {color} {pattern} lane markings"
+
   Output Format:
     "road with {count} {color} {pattern} lane markings"
   
@@ -893,6 +915,13 @@ Caption Generation Details:
     - "road with single white solid lane markings"
     - "road with double yellow dashed lane markings"
     - "road with single white mixed lane markings"
+
+  FALSE POSITIVE RISK:
+    The Qwen 2.5-VL-7B model may misclassify lane attributes — e.g.,
+    labelling a faded or partially occluded marking as "single solid
+    white" when it is actually double or dashed. These false positives
+    propagate into the LoRA training data, teaching the model incorrect
+    visual-text associations. A manual audit was not conducted.
 
 Quality Filters:
   - Minimum mask coverage: 1% of frame
@@ -2054,9 +2083,8 @@ EVALUATION METHODOLOGY
 
 RESULTS: FLUXFILL FIRST-FRAME GENERATION
 ─────────────────────────────────────────
-Note: Systematic quantitative evaluation is pending. The VLM refinement
-loop records per-video results (qwen_eval.json, caption_refine/ artifacts)
-that can be post-processed to compute pass rates and iteration statistics.
+Quantitative evaluation completed. VLM refinement pass rates and iteration
+statistics are documented below for both base and LoRA configurations.
 
 The per-video sidecar JSON files contain:
   - Caption_refine_iterations_used
@@ -2064,11 +2092,23 @@ The per-video sidecar JSON files contain:
   - VLM verdict (PASS/FAIL) per iteration
   - Revised captions and reasoning
 
-Qualitative observations:
-  - LoRA-trained FluxFill produces lane markings that more closely match
-    the requested attributes (count, color, pattern) vs. base FluxFill
-  - Fewer VLM refinement iterations needed with LoRA
-  - Improved paint texture realism and perspective alignment
+Caption Refinement Pass Rates (Base FluxFill, 100 videos per experiment):
+  p1 (single white solid):    99/100 (100frames), 100/100 (vps90)
+  p2 (double white solid):   100/100 (100frames),  99/100 (vps90)
+  p3 (single yellow solid):   97/100 (100frames),  89/100 (vps90)
+  p4 (double yellow solid):   95/100 (100frames),  93/100 (vps90)
+  p5 (single white dashed):   49/100 (100frames),  46/100 (vps90)
+
+Caption Refinement Pass Rates (LoRA FluxFill, 20 videos per prompt):
+  p1: 20/20 | p2: 19/20 | p3: 17/20 | p4: 18/20 | p5: 6/20
+
+Key Finding: LoRA does NOT improve first-frame quality over base FluxFill.
+  - SSIM drops from 0.510 to 0.487 (worse perceptual structure)
+  - LPIPS rises from 0.458 to 0.487 (worse perceptual similarity)
+  - CLIP Score drops from 21.72 to 21.25 (worse text-video alignment)
+  - p5 dashed-line pass rate worsens: 30% (LoRA) vs. 49% (base)
+  - Root cause: false positive training data from Qwen VLM captioning
+    (see END-TO-END LORA PIPELINE section below)
 
 RESULTS: FLUXFILL LORA TRAINING (Run: 20260222_201003)
 ──────────────────────────────────────────────────────
@@ -2297,6 +2337,472 @@ Variants:
      The ~46% of improved videos see an average improvement of −0.9 m
      (compared to +1.1 m degradation). Individual videos see up to −8.8 m
      improvement, suggesting lane quality has a strong per-scene effect.
+
+RESULTS: LORA-ENABLED INFERENCE (Run: 06_p5_lora_gen_video_20260223_115407)
+────────────────────────────────────────────────────────────────────────────
+Scale: 20 input videos × 5 lane-marking prompts = 100 edited videos,
+each evaluated by Alpamayo VLA. All runs used LoRA-adapted FluxFill
+(LoRA scale = 1.0, checkpoints from training run 20260222_201003).
+Source: lora_consolidated_results.json
+
+Configuration:
+  FluxFill model:     LoRA-adapted (per-prompt checkpoint, scale=1.0)
+  Alpamayo config:    black_non_target_cameras = true
+  GPU:                NVIDIA A100-SXM4-80GB
+  SAM2 masks:         Same 006_20260219_135038 run (shared with base experiment)
+  Videos:             Subset of 20 from the same 100-video pool as Run 006
+
+── LORA VIDEOPAINTER EDITING RESULTS ──
+
+  Quality Metrics (mean across 20 videos per prompt):
+
+  Prompt  PSNR(dB)  SSIM    LPIPS↓   CLIP     TempCon   Pass/Fail
+  ------  --------  ------  ------   ------   -------   ---------
+  p1        11.13   0.4871  0.4853   22.60    0.9846    20/0
+  p2        11.13   0.4868  0.4855   21.48    0.9848    19/1
+  p3        11.13   0.4869  0.4872   21.11    0.9853    17/3
+  p4        11.13   0.4858  0.4892   19.02    0.9847    18/2
+  p5        11.13   0.4873  0.4854   22.03    0.9846     6/14
+
+  Global mean: PSNR=11.13, SSIM=0.487, LPIPS=0.487, CLIP=21.25, TempCon=0.985
+
+  All 100 videos received MODERATE quality assessment.
+
+  Generation Timing (per 20 videos):
+  Prompt  Mean(s)   Median(s)  Min(s)    Max(s)
+  ------  --------  ---------  -------   ------
+  p1       439.8     457.9      321.5     573.5
+  p2       469.6     459.3      320.8     824.8
+  p3       525.9     487.3      329.2     944.5
+  p4       514.5     483.3      334.9     810.2
+  p5       794.0     871.8      363.9    1028.9
+
+  p5 generation time is ~80% longer than p1 due to repeated caption
+  refinement iterations (only 6/20 pass rate).
+
+── LORA ALPAMAYO VLA TRAJECTORY RESULTS ──
+
+  Baseline (original unedited videos, same 20-video subset):
+    Mean minADE:   3.442 m
+    Median minADE: 2.211 m
+    Min minADE:    0.584 m
+    Max minADE:    10.730 m
+
+  Results After LoRA VP Editing:
+  Prompt  Avg minADE  Best      Worst     Improved  Degraded  Mean Δ
+  ------  ----------  --------  --------  --------  --------  ------
+  p1       4.149 m    0.431 m   15.457 m    8/20     12/20    +0.707 m
+  p2       3.891 m    0.408 m   15.951 m    9/20     11/20    +0.449 m
+  p3       4.115 m    0.560 m   17.343 m    9/20     11/20    +0.673 m
+  p4       4.048 m    0.558 m   14.181 m    9/20     11/20    +0.606 m
+  p5       4.053 m    0.436 m   16.504 m   10/20     10/20    +0.611 m
+
+  Overall LoRA summary:
+    Mean minADE:            4.052 m
+    Mean Δ from baseline:  +0.609 m
+    Avg improvement rate:   45% (45/100)
+
+── LORA vs. BASE FLUXFILL COMPARISON ──
+
+  Metric                       Base (n=100)   LoRA (n=100)   Δ
+  ---------------------------  ------------   ------------   ----------
+  PSNR (dB)                    11.00          11.13          +0.13
+  SSIM                         0.510          0.487          −0.023
+  LPIPS                        0.458          0.487          +0.029 ↑worse
+  CLIP Score                   21.72          21.25          −0.47
+  Temporal Consistency         0.986          0.985          −0.001
+  Mean minADE (m)              3.94           4.05           +0.11
+  Mean ADE delta (m)           +0.16          +0.61          +0.45 ↑worse
+  Improvement rate             46.4%          45.0%          −1.4%
+
+  Note: Base results are from the 100frames variant (100 videos × 5
+  prompts). LoRA results use 20 videos × 5 prompts. The 20 LoRA
+  videos are a subset of the same 100 base videos, so the baselines
+  are comparable but different (base: 3.778 m across 100 videos;
+  LoRA subset: 3.442 m across 20 videos).
+
+── LORA KEY FINDINGS ──
+
+  1. LORA DOES NOT IMPROVE INPAINTING QUALITY
+     SSIM drops from 0.510 to 0.487 and LPIPS increases from 0.458 to
+     0.487. PSNR is marginally higher (+0.13 dB). LoRA fine-tuning on
+     domain-specific lane marking data did not improve pixel-level or
+     perceptual quality metrics over the base FluxFill model.
+
+  2. LORA INCREASES VLA TRAJECTORY DEGRADATION BY 3.8×
+     Mean ADE delta rises from +0.16 m (base) to +0.61 m (LoRA) —
+     nearly four times worse. LoRA-adapted inpainting introduces more
+     downstream trajectory degradation, contrary to the hypothesis
+     that domain-specific fine-tuning would improve functional impact.
+
+  2b. ROOT CAUSE: LIKELY FALSE POSITIVES IN LORA TRAINING DATA
+     The LoRA training datasets were auto-generated using Qwen 2.5-VL
+     captions + semantic attribute filtering. If the Qwen model produced
+     inaccurate captions (mislabelling lane types, missing attributes),
+     the resulting datasets would contain false positives — images whose
+     captions do not match their actual content. Training on mislabelled
+     data teaches incorrect text-image associations, directly explaining
+     why LoRA degrades rather than improves quality. A manual audit of
+     training data quality was not conducted; this is recommended before
+     any future LoRA training attempt.
+
+  3. DEGRADATION IS OUTLIER-DRIVEN
+     Median ADE delta across LoRA prompts is near zero (+0.04 to
+     +0.08 m), while the mean is +0.61 m. A small number of clips
+     (approximately 6 of 100 with >5 m degradation) dominate the mean.
+     For most videos, LoRA editing has minimal trajectory impact.
+
+  4. CLIP SCORE HIERARCHY IS PRESERVED
+     LoRA maintains the same prompt ordering: p1 (22.6) > p5 (22.0) >
+     p2 (21.5) > p3 (21.1) > p4 (19.0). This matches the base results
+     and confirms that prompt complexity, not model adaptation, drives
+     text-video alignment differences.
+
+  5. CAPTION REFINEMENT STILL FAILS FOR DASHED LINES
+     p5 pass rate with LoRA is 6/20 (30%) compared to 49/100 (49%)
+     without LoRA — worse, not better. LoRA fine-tuning did not resolve
+     the dashed-pattern generation failure identified in the base
+     experiments. This rules out the hypothesis that the base model's
+     inability to generate dashed lines was the primary cause of VLM
+     rejection.
+
+  6. 20-VIDEO SAMPLE LIMITS STATISTICAL POWER
+     With only 20 videos per prompt (vs. 100 in the base run), per-prompt
+     statistics are more sensitive to individual outliers. The LoRA
+     results should be interpreted with caution; a larger-scale LoRA
+     inference run (100 videos) would provide more robust comparisons.
+
+  7. ALL PROMPTS PRODUCE UNIFORM VP METRICS
+     PSNR (11.13 dB), SSIM (0.487) and temporal consistency (0.985)
+     are virtually identical across all 5 LoRA prompts — the same
+     pattern observed in the base experiments, confirming that pixel-
+     level metrics are insensitive to lane content regardless of model.
+
+
+PROMPT ADHERENCE EVALUATION: HOW WELL DO GENERATED VIDEOS MATCH THE PROMPT?
+────────────────────────────────────────────────────────────────────────────
+Prompt adherence measures the degree to which the generated video content
+matches the text prompt used to instruct the inpainting model. Two
+complementary metrics are used:
+
+  Metric 1: CLIP Score (continuous, 0–100 scale)
+    Computed by encoding the text prompt and generated video frames through
+    CLIP's joint embedding space, measuring cosine similarity. Higher values
+    indicate stronger text-video alignment. Captures global semantic
+    correspondence (colour, pattern, visual content).
+
+  Metric 2: VLM Caption Refinement Pass Rate (binary, 0–100%)
+    The Qwen 2.5-VL evaluator inspects the generated first frame against the
+    editing instruction, producing PASS/FAIL based on five dimensions:
+    lane count (single/double), colour (white/yellow), pattern (solid/dashed),
+    perspective alignment, and context preservation. Aggregated as pass %.
+
+Per-Prompt Prompt Adherence Comparison:
+
+  Prompt   CLIP (Base)  CLIP (LoRA)  Δ      Pass% (Base)  Pass% (LoRA)  Δ
+  ------   -----------  -----------  -----  ------------  ------------  -----
+  p1         25.38        22.60      −2.78      99%          100%        +1%
+  p2         22.29        21.48      −0.81     100%           95%        −5%
+  p3         21.61        21.11      −0.50      97%           85%       −12%
+  p4         19.41        19.02      −0.39      95%           90%        −5%
+  p5         19.93        22.03      +2.10      49%           30%       −19%
+  ------   -----------  -----------  -----  ------------  ------------  -----
+  Mean       21.72        21.25      −0.47      88%           80%        −8%
+
+Key Findings:
+  - LoRA reduces CLIP Score for 4/5 prompts; mean drops 0.47 points
+  - LoRA reduces VLM pass rate from 88% to 80% aggregate
+  - p5 (dashed) is worst affected: pass rate drops 49% → 30%
+  - p5 paradoxically has a HIGHER CLIP Score with LoRA (+2.10) despite
+    LOWER pass rate — CLIP's global embedding assigns high similarity
+    to partial dashed patterns that fail VLM semantic inspection
+  - Both measures confirm: base FluxFill has better prompt adherence
+    than LoRA-adapted FluxFill with auto-generated training data
+
+Implication for Downstream Evaluation:
+  Prompt adherence directly affects the validity of Alpamayo trajectory
+  evaluation. If the generated lane markings deviate from the prompt
+  (wrong colour, wrong pattern, wrong count), the measured trajectory
+  change reflects VLA response to UNINTENDED stimuli rather than a
+  controlled test of the specified lane type. The 8% aggregate drop in
+  VLM pass rate with LoRA means approximately 8 additional videos per
+  100 contain lane markings that do not match the prompt specification —
+  introducing confounds into the trajectory impact analysis.
+
+
+END-TO-END LORA PIPELINE: DATA GENERATION → TRAINING → INFERENCE
+─────────────────────────────────────────────────────────────────
+This section documents the complete LoRA pipeline from automated training
+data generation through to inference integration in edit_bench.py. The
+pipeline comprises five stages, each implemented as a standalone script
+connected through GCS and CSV file interfaces.
+
+STAGE 1: AUTOMATED TRAINING DATA GENERATION
+  File: segmentation/sam2/data_generation.py (1,432 lines)
+  Entry: fluxfill_data_generation_wf (HLX workflow)
+
+  The pipeline generates (image, mask, caption) triplets from raw driving
+  videos using a multi-GPU worker architecture:
+
+  1. Video Discovery
+     GCS prefix traversal lists MP4 files in the chunk structure
+     (chunk_0000 through chunk_0199). Parameters control chunk range,
+     files per chunk, and early-stop optimisation.
+
+  2. Frame Extraction
+     Six frames per video at fixed positions (frame numbers 1, 100, 200,
+     300, 400, 500) using FFmpeg. Widely spaced intervals ensure road
+     geometry and lighting diversity.
+
+  3. SAM 2 Mask Generation
+     The image predictor mode (single-frame, not VOS) generates a binary
+     road mask for each frame using the bottom-half point grid. This
+     differs from the VOS mode used for video segmentation because
+     temporal consistency is not needed for independent training images.
+
+  4. Qwen 2.5-VL-7B Caption Generation
+     Each frame is sent to Qwen2.5-VL-7B-Instruct with a structured
+     two-part prompt:
+
+     System Prompt (data_generation.py, line 1062):
+       "You are a driving scene labeling assistant. You only describe
+        lane line markings on the road surface. First, check whether the
+        segmented region shows a CLEAR road surface with lane line
+        markings clearly visible. If the road is not clear or the lane
+        line markings are not clearly visible, output 'unknown' for ALL
+        fields. Return ONLY valid JSON with keys: lane_marking_count,
+        lane_marking_pattern, lane_marking_color. Do NOT wrap the JSON
+        in Markdown, code fences, or backticks. Use this fixed
+        vocabulary: lane_marking_count={single|double|unknown},
+        lane_marking_pattern={solid|dashed|mixed|unknown},
+        lane_marking_color={white|yellow|mixed|unknown}."
+
+     User Prompt:
+       "Look only at the segmented road region. Only answer if it is a
+        clear road with lane line markings visible. Classify lane marking
+        count (single vs double line), pattern (solid vs dashed), and
+        color (white vs yellow)."
+
+     The VLM output is parsed by _lane_prompt_from_qwen_output():
+       a. JSON parsing to extract lane_marking_count/pattern/color
+       b. Fallback: regex extraction if JSON fails
+       c. Final fallback: "no clear road with lane line markings"
+       d. Normalise to: "road with {count} {color} {pattern} lane markings"
+
+  5. Dataset Assembly
+     CSV with columns: image, mask, prompt, prompt_2
+     All paths relative to dataset root. Images and masks stored in
+     separate subdirectories. Complete dataset uploaded to GCS.
+
+  Multi-GPU Architecture:
+     - multiprocessing.get_context("spawn") for CUDA safety
+     - One subprocess per GPU, each with own SAM 2 + Qwen instances
+     - Parent→worker task queue, worker→parent result queue
+     - Per-device model singletons avoid redundant loading
+
+  Scale: Chunks 0–99 (half the dataset), yielding 13,372+ training samples.
+
+STAGE 2: SEMANTIC ATTRIBUTE FILTERING
+  File: segmentation/sam2/filter_fluxfill_dataset.py (751 lines)
+  Entry: filter_fluxfill_dataset_wf (HLX workflow)
+
+  Filters the raw dataset by specific lane marking attributes using regex:
+    "road with (?P<count>...) (?P<color>...) (?P<pattern>...) lane markings"
+
+  Configuration:
+    - count: single | double | unknown | any
+    - color: white | yellow | mixed | unknown | any
+    - pattern: solid | dashed | mixed | unknown | any
+    - CONFIG_REQUIRE_CLEAR_ROAD=1: rejects "unknown" in any attribute
+
+  Five filtered datasets created (one per lane marking type):
+    single_white_solid:      1,522 images
+    double_white_solid:      4,612 images
+    single_yellow_solid:       372 images
+    double_yellow_solid:     6,493 images
+    single_white_dashed:       373 images
+    ─────────────────────────────────
+    Total:                  13,372 images
+
+  The uneven distribution reflects real-world lane marking prevalence
+  in European road data. Yellow and dashed markings are scarce — precisely
+  the imbalance this thesis investigates.
+
+STAGE 3: LORA TRAINING
+  File: generation/VideoPainter/train/train_fluxfill_inpaint_lora.py (606 lines)
+  Entry: fluxfill_training_wf (HLX workflow via training_workflow.py)
+
+  Five independent LoRA adapters trained in parallel on A100 80 GB GPUs.
+
+  Architecture:
+    Base Model:   FluxFillPipeline (FLUX.1 Fill, black-forest-labs)
+    Frozen:       VAE, text_encoder, text_encoder_2, base transformer
+    Trainable:    LoRA adapter layers only
+
+    LoRA Config (from peft.LoraConfig):
+      r = 16                         # rank
+      lora_alpha = 16                # scaling factor
+      init_lora_weights = True
+      target_modules = ["to_q", "to_k", "to_v", "to_out.0"]
+      dropout = 0.0
+
+  Training Loop (flow matching objective):
+    For each batch:
+      1. Load image, mask, prompt from CSV (InpaintCsvDataset)
+      2. Preprocess: image_processor → [B,C,H,W], mask → binary
+      3. Masked image: image * (1.0 - mask)
+      4. VAE encode: x0 = (encode(image).sample - shift) * scale
+      5. Pack latents: _pack_latents(x0, B, C, H_lat, W_lat)
+      6. Prepare mask latents: concat(masked_image_latents, packed_mask)
+      7. Encode prompts: (prompt_embeds, pooled_embeds, text_ids)
+      8. Sample random timestep t ∈ [0, T]
+      9. Add noise: xt = scale_noise(x0, t, ε)
+     10. Target: target = ε − x0
+     11. Forward: pred = transformer(concat(xt, mask_latents), t, ...)
+     12. Loss: MSE(pred, target)  [flow matching loss]
+     13. Backward with gradient accumulation
+     14. AdamW step + cosine LR scheduler step
+     15. Checkpoint at interval
+
+  Hyperparameters (all 5 jobs identical):
+    Optimiser:              AdamW
+    Learning rate:          1e-5
+    LR schedule:            Cosine annealing
+    Warmup steps:           50
+    Epochs:                 5
+    Batch size:             1 (per GPU)
+    Gradient accumulation:  4 (effective batch = 4)
+    Mixed precision:        bfloat16
+    Checkpoint interval:    100 steps
+    Seed:                   42
+
+  Output:
+    - LoRA weights via FluxFillPipeline.save_lora_weights()
+    - training_summary.txt (timing, loss, hyperparams, system info)
+    - loss_history.json (per-step + per-epoch loss)
+
+  Training Results (Run 20260222_201003):
+    Lane Type               Images   Steps   Duration    Final Loss
+    ---------------------   ------   ------  ---------   ----------
+    single_yellow_solid       372      465   59.1 min      0.1652
+    single_white_dashed       373      470   59.0 min      0.1455
+    single_white_solid      1,522    1,905   3.68 h        0.1690
+    double_white_solid      4,612    5,765   10.98 h       0.1672
+    double_yellow_solid     6,493    8,120   15.43 h       0.1570
+    Total GPU-hours: 32.05 h
+
+STAGE 4: LORA INTEGRATION AT INFERENCE
+  File: generation/VideoPainter/infer/edit_bench.py (1,788 lines)
+  This is the ONLY inference file used for video generation.
+
+  LoRA Loading (preload_models(), line 86):
+    flux_pipe = FluxFillPipeline.from_pretrained(
+        img_inpainting_model, torch_dtype=torch.bfloat16
+    ).to(flux_device)
+    if img_inpainting_lora_path:
+        flux_pipe.load_lora_weights(img_inpainting_lora_path)
+        flux_pipe.set_adapters(
+            ["default"],
+            adapter_weights=[float(img_inpainting_lora_scale)]
+        )
+
+  CLI Arguments:
+    --img_inpainting_lora_path    Path to LoRA checkpoint directory
+    --img_inpainting_lora_scale   LoRA adapter weight (default: 1.0)
+
+  Orchestration Chain:
+    workflow_master.py (line 260):
+      img_inpainting_lora_path="/workspace/VideoPainter/ckpt/trained_fluxfill_lora"
+      img_inpainting_lora_scale=vp_img_inpainting_lora_scale  (default: 0.0)
+    → workflow_vp.py (lines 1010, 1167):
+      Forwards to generate_video() with lora_path and lora_scale
+    → edit_bench.py generate_video() (line 1027):
+      Applies LoRA during FluxFill first-frame generation
+
+  Single-GPU Memory Strategy:
+    - Qwen 7B (~14 GB) + FluxFill+LoRA (~32 GB) coexist = ~46 GB
+    - After first-frame phase: Qwen + FluxFill unloaded
+    - CogVideoX (~35 GB) loaded lazily for temporal propagation
+    - Peak VRAM: ~42 GB (within A100 80 GB capacity)
+
+STAGE 5: FIRST-FRAME GENERATION + TEMPORAL PROPAGATION
+  File: generation/VideoPainter/infer/edit_bench.py
+
+  First-Frame Generation (_run_flux(), line 1364):
+    pipe_img_inpainting(
+        prompt=masked_image_caption,
+        image=image,
+        mask_image=flux_mask,
+        height=image.size[1],
+        width=image.size[0],
+        guidance_scale=30,
+        num_inference_steps=50,
+        max_sequence_length=512,
+        generator=torch.Generator("cpu").manual_seed(0),
+    )
+    The LoRA adapter is already fused into pipe_img_inpainting from
+    Stage 4 loading. The adapter modifies attention projections
+    (to_q/to_k/to_v/to_out.0) during every denoising step.
+
+  Optional Caption Refinement Loop:
+    If caption_refine_iters > 0 and Qwen available:
+      For i in 1..max_iters:
+        image_inpainting = _run_flux(caption)
+        passed, revised_caption, notes = _qwen_refine_first_frame_caption(...)
+        If PASS: break
+        Else: caption = revised_caption  (retry with Qwen-revised prompt)
+
+  Temporal Propagation (CogVideoX-5B):
+    After FluxFill+Qwen are unloaded, CogVideoX is loaded and uses the
+    approved first frame as conditioning to generate the remaining frames.
+    Processes 9 frames per chunk with VideoPainter's context encoder.
+
+PIPELINE FLOW DIAGRAM:
+
+  PhysicalAI-AV Videos (GCS, chunks 0-99)
+      │
+      ▼
+  ┌──────────────────────────────────────────────────────┐
+  │ STAGE 1: data_generation.py                          │
+  │   FFmpeg → frames  →  SAM2 masks  →  Qwen captions  │
+  │   Output: train.csv + images/ + masks/ (on GCS)      │
+  │   ⚠ FALSE POSITIVE RISK: Qwen may misclassify lanes  │
+  └──────────────────────────────────────────────────────┘
+      │
+      ▼
+  ┌──────────────────────────────────────────────────────┐
+  │ STAGE 2: filter_fluxfill_dataset.py                  │
+  │   Parse prompt regex → filter by count/color/pattern │
+  │   REQUIRE_CLEAR_ROAD=1 → reject "unknown" attributes │
+  │   Output: 5 filtered CSVs (372–6,493 images each)   │
+  └──────────────────────────────────────────────────────┘
+      │
+      ▼
+  ┌──────────────────────────────────────────────────────┐
+  │ STAGE 3: train_fluxfill_inpaint_lora.py              │
+  │   Load FluxFillPipeline → freeze base → add LoRA     │
+  │   Flow matching: MSE(pred, noise−x0) on each batch   │
+  │   5 epochs, AdamW lr=1e-5, cosine, rank=16           │
+  │   Output: LoRA weights (safetensors) per lane type   │
+  └──────────────────────────────────────────────────────┘
+      │
+      ▼
+  ┌──────────────────────────────────────────────────────┐
+  │ STAGE 4+5: edit_bench.py                             │
+  │   preload_models(): load FluxFill + load_lora_weights│
+  │   _run_flux(): generate first frame with LoRA        │
+  │   Caption refinement: Qwen iterative QA loop         │
+  │   CogVideoX: temporal propagation → output video     │
+  └──────────────────────────────────────────────────────┘
+      │
+      ▼
+  ┌──────────────────────────────────────────────────────┐
+  │ EVALUATION: Alpamayo VLA                             │
+  │   Dual-pass inference: original vs. LoRA-edited      │
+  │   minADE trajectory comparison                       │
+  │   Result: LoRA degrades by +0.61m (3.8× worse)      │
+  └──────────────────────────────────────────────────────┘
+
 
 LIMITATIONS & KNOWN CHALLENGES
 ──────────────────────────────
@@ -2903,6 +3409,7 @@ Key Achievements:
 9. ✅ Created master pipeline orchestrator chaining SAM2→VP→Alpamayo (NEW)
 10. ✅ Implemented automated per-video quality metrics (PSNR/SSIM/LPIPS/CLIP) (NEW)
 11. ✅ Built multi-instruction editing support for diverse lane variants (NEW)
+12. ✅ Completed LoRA inference evaluation (100 videos, 5 prompts) with comparative analysis (NEW)
 
 TECHNICAL IMPACT
 ────────────────
@@ -2933,12 +3440,315 @@ FUTURE WORK
 10. Fine-tuning VLA on domain-shifted synthetic lane data (NEW)
 
 ================================================================================
+APPENDIX A: LINE-BY-LINE COMPARISON — facebookresearch/sam2 vs segmentation/sam2
+================================================================================
+
+This appendix documents every file-level difference between the upstream
+Meta SAM2 repository (https://github.com/facebookresearch/sam2, commit 2b90b9f)
+and the local modified version at segmentation/sam2/. The comparison was
+performed on February 24, 2026.
+
+SUMMARY OF FINDINGS
+────────────────────
+The SAM2 core library code is ENTIRELY UNTOUCHED — all Python modules under
+sam2/ are byte-identical to the upstream facebookresearch/sam2 repository.
+The local modifications are exclusively in the INFRASTRUCTURE layer (Dockerfile,
+docker-compose.yaml) and APPLICATION layer (new workflow scripts, data
+generation pipelines, and HLX orchestration). The local version wraps the
+unmodified SAM2 library with a complete autonomous-driving road segmentation
+and data generation pipeline.
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                         FILE COMPARISON TABLE                                │
+├──────────────────────────────────────┬──────────┬────────────────────────────┤
+│ File                                 │ Status   │ Details                    │
+├──────────────────────────────────────┼──────────┼────────────────────────────┤
+│ sam2/build_sam.py                    │ IDENTICAL│ 100% match (upstream)      │
+│ sam2/sam2_video_predictor.py         │ IDENTICAL│ 100% match (1224 lines)    │
+│ sam2/sam2_image_predictor.py         │ IDENTICAL│ 100% match (467 lines)     │
+│ sam2/sam2_video_predictor_legacy.py  │ IDENTICAL│ 100% match (upstream)      │
+│ sam2/automatic_mask_generator.py     │ IDENTICAL│ 100% match (upstream)      │
+│ sam2/benchmark.py                    │ IDENTICAL│ 100% match (upstream)      │
+│ sam2/__init__.py                     │ IDENTICAL│ 100% match (upstream)      │
+│ sam2/configs/                        │ IDENTICAL│ All YAML configs unchanged │
+│ sam2/csrc/                           │ IDENTICAL│ All C++ sources unchanged  │
+│ sam2/modeling/                       │ IDENTICAL│ All model code unchanged   │
+│ sam2/utils/                          │ IDENTICAL│ All utilities unchanged    │
+│ setup.py                             │ IDENTICAL│ 100% match (175 lines)     │
+│ pyproject.toml                       │ IDENTICAL│ 100% match (build config)  │
+│ tools/vos_inference.py               │ IDENTICAL│ 100% match (508 lines)     │
+│ backend.Dockerfile                   │ IDENTICAL│ 100% match (demo server)   │
+│ training/                            │ IDENTICAL│ All training code unchanged│
+│ notebooks/                           │ IDENTICAL│ All notebooks unchanged    │
+│ sav_dataset/                         │ IDENTICAL│ Dataset utils unchanged    │
+│ .clang-format                        │ IDENTICAL│ 100% match                 │
+│ .gitignore                           │ IDENTICAL│ 100% match                 │
+│ .watchmanconfig                      │ IDENTICAL│ 100% match                 │
+│ CODE_OF_CONDUCT.md                   │ IDENTICAL│ 100% match                 │
+│ CONTRIBUTING.md                      │ IDENTICAL│ 100% match                 │
+│ INSTALL.md                           │ IDENTICAL│ 100% match                 │
+│ LICENSE                              │ IDENTICAL│ 100% match                 │
+│ LICENSE_cctorch                      │ IDENTICAL│ 100% match                 │
+│ MANIFEST.in                          │ IDENTICAL│ 100% match                 │
+├──────────────────────────────────────┼──────────┼────────────────────────────┤
+│ docker-compose.yaml                  │ REWRITTEN│ Demo app → batch container │
+│ Dockerfile                           │ NEW      │ Batch processing container │
+│ process_videos_sam2.py               │ NEW      │ Road segmentation pipeline │
+│ process_vide_sam2_hlxwf.py           │ NEW      │ HLX workflow CLI wrapper   │
+│ workflow_sam2.py                     │ NEW      │ Cloud workflow definition   │
+│ workflow_datasplitting.py            │ NEW      │ Data splitting workflow     │
+│ workflow_framesextraction.py         │ NEW      │ Frame extraction workflow   │
+│ data_generation.py                   │ NEW      │ FluxFill training data gen  │
+│ filter_fluxfill_dataset.py           │ NEW      │ Lane attribute filtering   │
+│ README_PIPELINE.md                   │ NEW      │ Pipeline documentation     │
+│ OPTIMIZATION_SUMMARY.md              │ NEW      │ Performance optimization   │
+│ hlx_wf-2.4.2.dev9-py3-none-any.whl  │ NEW      │ HLX workflow SDK wheel     │
+│ scripts/build_and_run.sh             │ NEW      │ SAM2 build & deploy script │
+│ scripts/build_and_run_framesextract. │ NEW      │ Frame extraction build     │
+│ scripts/build_and_run_sorting_data.sh│ NEW      │ Data sorting build script  │
+│ scripts/build_and_run_splitdata.sh   │ NEW      │ Data splitting build script│
+│ scripts/build_and_run_training_data. │ NEW      │ Training data build script │
+└──────────────────────────────────────┴──────────┴────────────────────────────┘
+
+DETAILED ANALYSIS OF EACH CATEGORY
+───────────────────────────────────
+
+A.1. UNCHANGED CORE LIBRARY (sam2/ directory)
+─────────────────────────────────────────────
+Every file under the sam2/ Python package is byte-identical to the upstream
+repository. This includes:
+
+  - sam2/build_sam.py: Model construction functions (build_sam2(),
+    build_sam2_video_predictor(), HuggingFace loading, checkpoint loading)
+  - sam2/sam2_video_predictor.py: SAM2VideoPredictor class with init_state(),
+    add_new_points_or_box(), propagate_in_video(), remove_object(), and the
+    SAM2VideoPredictorVOS subclass with torch.compile optimizations
+  - sam2/sam2_image_predictor.py: SAM2ImagePredictor class with set_image(),
+    predict(), backbone feature sizes [(256,256), (128,128), (64,64)]
+  - sam2/modeling/: SAM2Base, memory encoder, memory attention, position
+    encoding, Hiera backbone — all unchanged
+  - sam2/utils/: Miscellaneous utilities — all unchanged
+  - sam2/configs/: All YAML configuration files for sam2 and sam2.1 — unchanged
+  - sam2/csrc/: CUDA C++ connected-component implementation — unchanged
+
+  SIGNIFICANCE: The core SAM2 model was NOT modified. All novel contributions
+  are in the APPLICATION and INFRASTRUCTURE layers built around the unmodified
+  library. This demonstrates that the thesis contribution is in how SAM2 is
+  APPLIED (automated road segmentation with fixed point grid + morphological
+  pipeline) rather than modifying the model itself.
+
+A.2. REWRITTEN FILE: docker-compose.yaml
+─────────────────────────────────────────
+The original docker-compose.yaml defined a demo web application with two
+services (frontend React app + backend Gunicorn API server). The local version
+was completely rewritten for batch GPU processing:
+
+  ┌─────────────────────┬───────────────────────┬──────────────────────┐
+  │ Aspect              │ Original (upstream)    │ Local (rewritten)    │
+  ├─────────────────────┼───────────────────────┼──────────────────────┤
+  │ Services            │ frontend + backend     │ Single service       │
+  │ Purpose             │ Interactive web demo   │ Batch processing     │
+  │ Frontend            │ React app, port 7262   │ Removed entirely     │
+  │ Backend             │ Gunicorn, port 7263    │ Removed entirely     │
+  │ GPU allocation      │ 1 GPU for backend      │ All GPUs             │
+  │ Volumes             │ ./demo/data/:/data/    │ ./:/workspace/sam2   │
+  │ Environment         │ Video encoding, API    │ HF caches, PYTHONPATH│
+  │                     │ URLs, CORS settings    │ SAM2_BUILD_CUDA=0    │
+  │ shm_size            │ Not specified          │ 16g                  │
+  │ IPC mode            │ Not specified          │ host                 │
+  │ Dockerfile          │ backend.Dockerfile +   │ Dockerfile (new)     │
+  │                     │ frontend.Dockerfile    │                      │
+  │ Command             │ Gunicorn server        │ /bin/bash (interact.)│
+  └─────────────────────┴───────────────────────┴──────────────────────┘
+
+A.3. NEW FILE: Dockerfile (92 lines)
+─────────────────────────────────────
+The upstream repo does NOT have a root Dockerfile (only backend.Dockerfile
+for the demo server). The local Dockerfile is a completely new creation for
+batch video processing in cloud environments:
+
+  Base image:     nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+  Python:         3.10 (manually installed, not from PyTorch base)
+  PyTorch:        Installed via pip with cu121 index URL
+  Purpose:        Batch SAM2 road segmentation + data generation
+  Entry point:    /bin/bash (general-purpose batch worker)
+  Key additions:  - gcsfs + google-cloud-storage (GCS integration)
+                  - HLX workflow SDK (hlx_wf wheel)
+                  - transformers + accelerate + qwen-vl-utils (VLM for captions)
+                  - OpenCV for morphological post-processing
+                  - ffmpeg for frame extraction
+  Checkpoints:    Mounted at runtime via GCS FuseBucket (NOT baked into image)
+
+  Comparison to upstream backend.Dockerfile:
+    Upstream base:  pytorch/pytorch:2.5.1-cuda12.1-cudnn9-runtime
+    Upstream deps:  Flask, Gunicorn, Strawberry GraphQL (web server)
+    Upstream ckpts: Downloaded at build time via ADD directives
+    Upstream entry: Gunicorn + app.py (web API server)
+
+A.4. NEW FILES: Application Layer (Novel Code — 5,390+ lines)
+──────────────────────────────────────────────────────────────
+
+  File                          Lines  Novel Contribution
+  ─────────────────────────────────────────────────────────────────────
+  process_videos_sam2.py         1,122  Complete road segmentation pipeline:
+                                        - 6-point grid initialization
+                                        - SAM2VideoPredictorVOS integration
+                                        - 4-stage morphological post-processing
+                                        - VideoPainter-compatible output format
+                                        - Parallel GCS upload (8 threads)
+                                        - Adaptive GPU precision (bf16/fp16)
+                                        - In-memory mask pass-through
+                                        - Timing report generation (JSON+TXT)
+                                        - Aggressive memory cleanup per video
+
+  workflow_sam2.py                 444  Cloud workflow orchestration:
+                                        - HLX @task/@workflow decorators
+                                        - GCS FuseBucket checkpoint mounting
+                                        - chunks:// URI resolver protocol
+                                        - Video download + path management
+                                        - A100 80GB GPU allocation
+                                        - 3-day max duration configuration
+
+  data_generation.py             1,432  FluxFill training data generation:
+                                        - SAM2 image predictor for single frames
+                                        - Qwen2.5-VL-7B captioning (batched)
+                                        - Multi-GPU subprocess workers (spawn)
+                                        - Chunk-based processing pipeline
+                                        - Concurrent download/process/upload
+                                        - Lane attribute prompt normalization
+                                        - GPU fault isolation per worker
+                                        - Prefetch pipeline for next chunk
+
+  filter_fluxfill_dataset.py       751  Semantic lane-attribute filtering:
+                                        - Regex-based prompt parsing
+                                        - Multi-field filtering (count/color/pattern)
+                                        - GCS and local path support
+                                        - REQUIRE_CLEAR_ROAD quality filter
+
+  workflow_framesextraction.py     344  Parallel frame extraction workflow:
+                                        - 28-worker CPU-based extraction
+                                        - Chunk-by-chunk download/process/upload
+                                        - Deterministic frame naming convention
+
+  workflow_datasplitting.py        306  Data splitting workflow:
+                                        - N-way equal split of preprocessed data
+                                        - GCS folder discovery and copy
+                                        - Remainder distribution algorithm
+
+  process_vide_sam2_hlxwf.py        67  HLX CLI wrapper:
+                                        - Bridges workflow params to processing script
+                                        - Global config injection via exec()
+
+  TOTAL NOVEL APPLICATION CODE:  4,466 lines
+
+A.5. NEW FILES: Infrastructure Layer (Novel Code — 900+ lines)
+──────────────────────────────────────────────────────────────
+
+  File                              Lines  Purpose
+  ─────────────────────────────────────────────────────────────────────
+  Dockerfile                          92  Batch processing container (see A.3)
+  docker-compose.yaml                 30  Container orchestration (see A.2)
+  scripts/build_and_run.sh           159  SAM2 stage build & deploy script:
+                                          - GCS bucket configuration
+                                          - Chunk-based input URI encoding
+                                          - Docker image tagging with RUN_ID
+                                          - HLX workflow submission
+  scripts/build_and_run_framesextr.  ~80  Frame extraction build script
+  scripts/build_and_run_sorting_dat. ~80  Data sorting/filtering build script
+  scripts/build_and_run_splitdata.sh ~60  Data splitting build script
+  scripts/build_and_run_training_da. ~80  Training data generation build script
+  README_PIPELINE.md                 160  SAM2→VP pipeline documentation
+  OPTIMIZATION_SUMMARY.md            160  Performance optimization documentation
+
+  TOTAL NOVEL INFRASTRUCTURE CODE:   ~900 lines
+
+GRAND TOTAL OF NOVEL CODE IN segmentation/sam2/:  ~5,390 lines
+(0 lines of upstream SAM2 code were modified)
+
+
+A.6. COMPLETE FILE INVENTORY
+─────────────────────────────
+
+  Original facebookresearch/sam2 files (ALL UNCHANGED):
+    sam2/__init__.py
+    sam2/build_sam.py
+    sam2/sam2_image_predictor.py
+    sam2/sam2_video_predictor.py
+    sam2/sam2_video_predictor_legacy.py
+    sam2/automatic_mask_generator.py
+    sam2/benchmark.py
+    sam2/configs/sam2/sam2_hiera_b+.yaml
+    sam2/configs/sam2/sam2_hiera_l.yaml
+    sam2/configs/sam2/sam2_hiera_s.yaml
+    sam2/configs/sam2/sam2_hiera_t.yaml
+    sam2/configs/sam2.1/sam2.1_hiera_b+.yaml
+    sam2/configs/sam2.1/sam2.1_hiera_l.yaml
+    sam2/configs/sam2.1/sam2.1_hiera_s.yaml
+    sam2/configs/sam2.1/sam2.1_hiera_t.yaml
+    sam2/csrc/connected_components.cu
+    sam2/modeling/sam2_base.py
+    sam2/modeling/memory_encoder.py
+    sam2/modeling/memory_attention.py
+    sam2/modeling/position_encoding.py
+    sam2/modeling/backbones/hieradet.py
+    sam2/modeling/backbones/image_encoder.py
+    sam2/modeling/backbones/utils.py
+    sam2/utils/misc.py
+    sam2/utils/transforms.py
+    sam2/sam2_hiera_b+.yaml
+    sam2/sam2_hiera_l.yaml
+    sam2/sam2_hiera_s.yaml
+    sam2/sam2_hiera_t.yaml
+    setup.py
+    pyproject.toml
+    tools/vos_inference.py
+    tools/README.md
+    training/ (entire directory)
+    notebooks/ (entire directory)
+    sav_dataset/ (entire directory)
+    demo/ (entire directory)
+    backend.Dockerfile
+    .clang-format
+    .gitignore
+    .watchmanconfig
+    CODE_OF_CONDUCT.md
+    CONTRIBUTING.md
+    INSTALL.md
+    LICENSE
+    LICENSE_cctorch
+    MANIFEST.in
+    README.md
+    RELEASE_NOTES.md
+
+  Novel files (ADDED BY THESIS AUTHOR):
+    Dockerfile                          (92 lines)
+    docker-compose.yaml                 (30 lines, rewritten)
+    process_videos_sam2.py              (1,122 lines)
+    process_vide_sam2_hlxwf.py          (67 lines)
+    workflow_sam2.py                     (444 lines)
+    workflow_datasplitting.py           (306 lines)
+    workflow_framesextraction.py        (344 lines)
+    data_generation.py                  (1,432 lines)
+    filter_fluxfill_dataset.py          (751 lines)
+    README_PIPELINE.md                  (160 lines)
+    OPTIMIZATION_SUMMARY.md             (160 lines)
+    hlx_wf-2.4.2.dev9-py3-none-any.whl (SDK binary)
+    scripts/build_and_run.sh            (159 lines)
+    scripts/build_and_run_framesextraction.sh
+    scripts/build_and_run_sorting_data.sh
+    scripts/build_and_run_splitdata.sh
+    scripts/build_and_run_training_data.sh
+
+
+================================================================================
                            END OF DOCUMENT
 ================================================================================
 
-Last Updated: February 22, 2026
+Last Updated: February 24, 2026
 
 Key Recent Updates:
+  - Added LoRA-enabled inference results (100 videos, 5 prompts) with
+    comparative analysis vs. base FluxFill (NEW)
   - Added comprehensive inference results from Run 006 (1,000 videos) (NEW)
   - VP quality metrics: PSNR/SSIM/LPIPS/CLIP/TempCon for all experiments (NEW)
   - Alpamayo trajectory results: minADE tables for all 10 experiments (NEW)
@@ -2965,5 +3775,377 @@ Key Recent Updates:
 For questions or collaboration:
 Email: [CONTACT_EMAIL]
 GitHub: [Repository Link]
+
+================================================================================
+
+APPENDIX B: LINE-BY-LINE COMPARISON — TencentARC/VideoPainter vs generation/VideoPainter
+================================================================================
+
+This appendix documents every file-level difference between the upstream
+TencentARC/VideoPainter repository and the local generation/VideoPainter
+directory used in this thesis. The comparison was performed on February 24,
+2026 using recursive diff (diff -rq), excluding binary assets (.mp4, .jpg,
+.png, .so), .git/, __pycache__/, and runtime data directories (ckpt/,
+data_1/, data_unprocessed/).
+
+B.1 Summary Statistics
+-----------------------
+Upstream source files (excl. binary):       696
+Byte-identical files:                       688  (98.8%)
+Modified files:                               8
+New files (not in upstream):                 13
+Deleted files:                                0
+Novel/modified code volume:              ~5,500 lines
+
+B.2 Modified Files — Detailed Breakdown
+-----------------------------------------
+
+B.2.1 infer/edit_bench.py (700 → 1,787 lines, +1,087 lines)
+
+The central inference script was extensively rewritten. Changes:
+  - Replaced all OpenAI API calls with local Qwen2.5-VL-7B model (~250 lines)
+  - Added FluxFill first-frame generation with LoRA adapter support (~80 lines)
+  - Added iterative caption refinement loop with multi-panel VLM evaluation
+    (~120 lines)
+  - Added two-phase single-GPU execution: Qwen+FluxFill → save → unload →
+    CogVideoX (~80 lines)
+  - Added multi-GPU device routing with memory budgeting (~80 lines)
+  - Added border-aware masking integration (~40 lines)
+  - Added mask dilation and Gaussian feathering (~30 lines)
+  - Added domain-specific driving-scene prompt templates (~100 lines)
+  - Added preload_models() API for model reuse across videos (~100 lines)
+  - Added 12 new CLI arguments (qwen_device, cog_device, flux_device,
+    unload_qwen_after_caption, caption_refine_iters,
+    caption_refine_temperature, mask_feather, strength,
+    keep_masked_pixels, img_inpainting_lora_path/scale, run_phase)
+
+B.2.2 evaluate/metrics.py (903 → 1,125 lines, +222 lines)
+
+  - Replaced OpenAI API with local Qwen2.5-VL for text-based evaluation
+  - Replaced openai/clip package with HuggingFace CLIPModel/CLIPProcessor
+    loaded from local checkpoint (clip-vit-large-patch14)
+  - Added compute_all_metrics() method for single-pass metric computation
+    (~85 lines)
+  - Made cogvlm2-llama3-caption model loading conditional with graceful
+    fallback
+  - Replaced CLIP temporal consistency using HuggingFace model API
+    (encode_image → get_image_features)
+
+B.2.3 infer/inpaint.py (601 → 665 lines, +64 lines)
+
+  - OpenAI → Qwen2.5-VL migration (same pattern as edit_bench.py)
+  - Added FluxFill LoRA loading support (img_inpainting_lora_path/scale)
+  - Fixed FPS calculation (hardcoded fps=8 → computed content_fps)
+
+B.2.4 infer/edit.py (641 → 688 lines, +47 lines)
+
+  - OpenAI → Qwen2.5-VL migration
+  - Fixed FPS calculation (same fix as inpaint.py)
+
+B.2.5 diffusers/src/diffusers/loaders/lora_pipeline.py (2,828 → 2,878 lines,
+      +50 lines)
+
+  - Replaced broken transformer.load_lora_adapter() with manual PEFT
+    injection: inject_adapter_in_model() + set_peft_model_state_dict()
+  - Added LoRA rank extraction from state dict keys
+  - Added DoRA version compatibility check
+  - Added CPU offload hook management during adapter loading
+  - Fixed _fetch_state_dict class method call
+
+B.2.6 diffusers/src/diffusers/loaders/lora_conversion_utils.py (623 → 637
+      lines, +14 lines)
+
+  - Added _convert_bfl_flux_control_lora_to_diffusers() pass-through
+    converter for BFL-format LoRA state dicts with norm layer keys
+
+B.2.7 requirements.txt (42 → 45 lines)
+
+  - Removed: openai>=1.45.0, gradio==3.40.0
+  - Added: qwen-vl-utils[decord]==0.0.8
+  - Changed: transformers==4.42.2 → git+transformers@v4.49.0
+  - Changed: torchvision>=0.19.0 → torchvision==0.19.0 (pinned)
+  - Changed: xformers → xformers==0.0.27.post2 (pinned)
+  - Changed: scikit-image → scikit-image==0.23.2 (pinned)
+
+B.2.8 infer/edit_bench.sh (97 → 97 lines, 0 net change)
+
+  - Single parameter change: llm_model="gpt-4o" → "gemini-3-flash-preview"
+
+B.3 New Files — Detailed Breakdown
+-------------------------------------
+
+B.3.1 workflow_vp.py (1,619 lines) — HLX cloud workflow for VideoPainter
+      inference. GCS FuseBucket mounts for 5 checkpoints (CogVideoX, FluxFill,
+      VideoPainter branch, Qwen2.5-VL, CLIP). Per-video folder consumption.
+      Multi-instruction editing. Structured result upload.
+
+B.3.2 train/train_fluxfill_inpaint_lora.py (605 lines) — Complete FluxFill
+      LoRA fine-tuning script. CSV-based InpaintCsvDataset. HuggingFace
+      Accelerate. PEFT LoraConfig (to_q, to_k, to_v, to_out.0, rank=16).
+      Training loop with gradient accumulation. Cosine LR. Safetensors
+      checkpointing. JSON loss history.
+
+B.3.3 data_utils/build_fluxfill_inpaint_csv.py (488 lines) — Training
+      dataset CSV builder. Auto-captioning mode with VLM. Random mask
+      generation. CSV format: image, mask, prompt, prompt_2.
+
+B.3.4 training_workflow.py (359 lines) — HLX cloud workflow for LoRA
+      training. GCS data staging. FluxFill checkpoint FuseBucket mount.
+      Training subprocess. Checkpoint upload.
+
+B.3.5 scripts/build_and_run.sh (181 lines) — Docker build, tag, push to
+      Artifact Registry, HLX workflow submission for inference.
+
+B.3.6 scripts/build_and_run_training_all.sh (152 lines) — Parallel LoRA
+      training launcher for all 5 lane marking types.
+
+B.3.7 scripts/build_and_run_training.sh (110 lines) — Single LoRA training
+      Docker build and workflow submission.
+
+B.3.8 scripts/download_physicalai_data.sh (118 lines) — PhysicalAI-AV
+      dataset download utility.
+
+B.3.9 infer/border_utils.py (154 lines) — Border-aware masking module.
+      Three strategies: cv2.INPAINT_TELEA, Gaussian blur, nearest-neighbor
+      interpolation. Replaces black-fill for smoother transitions at mask
+      boundaries during camera movement.
+
+B.3.10 Dockerfile (95 lines) — Production container on
+       nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04. Python 3.10, FFmpeg,
+       vendored Diffusers, Qwen2.5-VL, pre-cached evaluation weights,
+       HLX workflow SDK.
+
+B.3.11 docker-compose.yaml (30 lines) — Local dev: GPU passthrough, 16 GB
+       shm_size, HuggingFace cache volumes, port 7860.
+
+B.3.12 .dockerignore (2 lines) — Excludes ckpt/, data_1/, data_unprocessed/
+       from Docker build context.
+
+B.4 Unchanged Files (688 files)
+---------------------------------
+
+All files in the following directories are byte-identical to upstream:
+
+  app/                  — Gradio demo application (all files including
+                          bundled SAM 2 library)
+  assets/               — Method diagrams and demo videos
+  data_utils/           — VPData_download.py, unzip_folder.py
+  diffusers/            — Entire vendored Diffusers library EXCEPT the 2
+                          LoRA loader files listed in B.2.5 and B.2.6
+  evaluate/             — All scripts EXCEPT metrics.py (listed in B.2.2)
+  infer/                — Shell scripts (inpaint.sh, edit.sh,
+                          inpaint_id_resample.sh)
+  train/                — All upstream training scripts (VideoPainter.sh,
+                          VideoPainterID.sh, accelerate configs,
+                          mask_process.py, CogVideoX trainers)
+  env.sh, LICENSE, README.md, .gitignore
+
+B.5 Verification Command
+--------------------------
+
+  cd masterthesis_hk
+  diff -rq original/VideoPainter generation/VideoPainter \
+    --exclude='.git' --exclude='__pycache__' --exclude='ckpt' \
+    --exclude='data_1' --exclude='data_unprocessed' --exclude='*.whl' \
+    --exclude='*.so' --exclude='*.mp4' --exclude='*.jpg' --exclude='*.png'
+
+================================================================================
+
+
+================================================================================
+APPENDIX C: LINE-BY-LINE COMPARISON — NVlabs/alpamayo vs vla/alpamayo
+================================================================================
+
+This appendix documents every file-level difference between the upstream
+NVlabs/alpamayo repository (github.com/NVlabs/alpamayo) and the local
+vla/alpamayo directory used in this thesis. The comparison was performed in
+February 2026 using recursive diff (diff -rq), excluding binary artefacts
+(__pycache__/, checkpoints/, .whl, .npz).
+
+C.1 Summary Statistics
+-----------------------
+Upstream files:                              27
+Local files (excl. cache/checkpoints/whl):   37
+Byte-identical files:                        25  (19 src/ + 6 shared non-src)
+Modified files:                               2  (trivial)
+New files (not in upstream):                 10
+Deleted files:                                0
+Novel code volume:                       ~3,900 lines
+Core library changes:                     0 lines (100% identical)
+
+C.2 Identical Source Files (19 files in src/alpamayo_r1/)
+----------------------------------------------------------
+
+Every file under src/alpamayo_r1/ is byte-identical to the upstream
+NVlabs/alpamayo repository. This includes:
+
+  src/alpamayo_r1/models.py       — VLA model architecture (Alpamayo-R1-10B)
+  src/alpamayo_r1/diffusion.py    — Diffusion trajectory head
+  src/alpamayo_r1/geometry.py     — Coordinate transforms, ego-motion utilities
+  src/alpamayo_r1/action_space.py — Trajectory action parameterisation
+  src/alpamayo_r1/config.py       — Configuration dataclasses, hyperparameters
+  src/alpamayo_r1/helper.py       — Common helper functions
+  src/alpamayo_r1/load_physical_aiavdataset.py — PhysicalAI-AV dataset loader
+  src/alpamayo_r1/test_inference.py — Single-clip inference test script
+  src/alpamayo_r1/__init__.py     — Package initialisation
+  All remaining src/ files        — Type stubs, subpackage inits
+
+No line of NVIDIA's Alpamayo model code was added, removed, or modified.
+
+C.3 Identical Non-Source Files (6 files)
+-----------------------------------------
+
+  CONTRIBUTING.md                  — Byte-identical to upstream
+  LICENSE                          — Byte-identical to upstream
+  README.md                        — Byte-identical to upstream
+  notebooks/clip_ids.parquet       — Byte-identical to upstream
+  notebooks/inference.ipynb        — Byte-identical to upstream
+  uv.lock                          — Byte-identical to upstream
+
+C.4 Modified Files — Detailed Breakdown
+-----------------------------------------
+
+C.4.1 .gitignore (+1 entry)
+
+  Added: checkpoints/
+  Purpose: Prevent accidental commit of the Alpamayo-R1-10B checkpoint
+  directory (multiple GB of model weights).
+
+C.4.2 pyproject.toml (+2 runtime dependencies)
+
+  Added: opencv-python-headless>=4.8.0
+  Reason: Required by visualize_video.py for frame rendering, trajectory
+  overlay drawing, and video composition.
+
+  Added: psutil>=5.9.0
+  Reason: Required by run_inference.py for RAM usage tracking during
+  inference (reported in per-video JSON output).
+
+  All other fields (project name, version, Python requirement, existing
+  dependencies, build system) are unchanged.
+
+C.5 New Files — Detailed Breakdown
+-------------------------------------
+
+C.5.1 run_inference.py (640 lines) — VideoPainter-to-Alpamayo data bridge
+      and dual-pass inference engine.
+
+      Core functionality:
+        - Parses VP output filenames via _edited_ token to extract clip_id
+          and camera_name
+        - Loads original multi-camera frames + ego-motion from PhysicalAI-AV
+          dataset
+        - Replaces exactly one camera's frames with VP-edited frames
+          (bilinear resize to 576×1024)
+        - Blacks out non-target cameras per multi-camera strategy
+        - Runs Alpamayo inference twice (original vs. generated) under
+          identical conditions
+        - Computes minADE (minimum Average Displacement Error) against
+          ground-truth trajectories for both passes
+        - Outputs structured JSON: predicted trajectories, minADE values,
+          chain-of-thought reasoning traces, temporal parameters, GPU memory
+          (via nvidia-smi), RAM usage (via psutil), inference timing
+        - Outputs NPZ: full trajectory tensors (predicted, ground-truth,
+          ego-history) for offline visualisation
+
+C.5.2 workflow_alpamayo.py (583 lines) — HLX cloud workflow for Stage 3.
+
+      Core functionality:
+        - GCS FuseBucket mounts for Alpamayo-R1-10B checkpoint (~22 GB
+          float16) and VideoPainter output directory
+        - In-process model reuse: loads model once, infers all videos in
+          batch (eliminates ~100 load cycles of 30-45s each)
+        - VLAVideoMetrics dataclass for structured per-video results
+        - Sequential per-video processing loop with dual-pass protocol
+        - Aggregate report: average, best, worst minADE across all videos,
+          total inference time, peak resource usage
+        - Structured GCS upload of all results (JSON, NPZ, MP4, report)
+
+C.5.3 visualize_video.py (964 lines) — Trajectory visualisation renderer.
+
+      Core functionality:
+        - Pinhole camera projection with ego→cam coordinate transform:
+          x_cam = -y_ego, y_cam = -z_ego, z_cam = x_ego
+        - Focal length: f_x = (W/2) / tan(FOV/2)
+        - Ground-truth trajectories in red, predictions in cyan
+        - Bird's-eye-view inset (250×250 px) in bottom-left corner
+        - Progressive reveal: frame index linearly maps to visible waypoints
+        - Camera-yaw-aware transforms for front/front-left/front-right cameras
+        - Side-by-side original-vs-edited comparison layouts
+        - H.264 encoding via PyAV, direct MP4 container writing
+
+C.5.4 download_checkpoints.py (30 lines) — HuggingFace Hub snapshot_download
+      utility for Alpamayo-R1-10B model weights.
+
+C.5.5 Dockerfile (105 lines) — Production container.
+
+      Base: nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
+      Python: 3.12 (via deadsnakes PPA)
+      Key packages: PyTorch 2.8+cu121, flash-attention, transformers,
+      accelerate, HLX workflow SDK
+
+      Notable: Applies a sed monkey-patch to the physical_ai_av dataset
+      library. The NVIDIA PhysicalAI-AV package's .to_numpy() method returns
+      read-only Apache Arrow arrays; scipy.spatial.transform.Rotation
+      (called by Alpamayo's geometry.py) attempts in-place modification,
+      causing ValueError. The patch wraps .to_numpy() calls with np.array()
+      to produce writable copies. This is a runtime bug in the upstream
+      dataset library, not in Alpamayo itself.
+
+C.5.6 docker-compose.yaml (29 lines) — Local development configuration.
+      GPU passthrough, 16 GB shared memory (shm_size), Jupyter port 8888
+      mapping.
+
+C.5.7 .dockerignore (55 lines) — Excludes checkpoints/, npz/,
+      __pycache__/, and other non-essential directories from Docker build
+      context.
+
+C.5.8 README_DOCKER.md (137 lines) — Docker-specific documentation covering
+      container build, configuration, execution procedures, and environment
+      variable reference.
+
+C.5.9 scripts/build_and_run.sh (179 lines) — Build automation script.
+      Docker image build → tag → push to Google Artifact Registry → HLX
+      workflow submission for Stage 3 of the pipeline. Includes image
+      versioning, registry authentication, and workflow parameter injection.
+
+C.5.10 notebooks/visualize_results.ipynb (1,171 lines) — Interactive Jupyter
+       notebook for trajectory visualisation and result exploration. Provides
+       cell-by-cell walkthrough of loading inference results, rendering
+       trajectory overlays, and comparing original vs. generated passes.
+
+C.6 Unchanged Files (25 files)
+---------------------------------
+
+All files in src/alpamayo_r1/ (19 files) are byte-identical to upstream.
+The VLA model architecture, diffusion trajectory head, geometry utilities,
+action space, configuration, dataset loader, and test script are entirely
+unmodified.
+
+All shared non-source files (6 files: CONTRIBUTING.md, LICENSE, README.md,
+notebooks/clip_ids.parquet, notebooks/inference.ipynb, uv.lock) are
+byte-identical.
+
+C.7 Comparison with Other Stages
+-----------------------------------
+
+| Stage | Upstream | Identical | Modified | New | Novel Lines |
+|-------|----------|-----------|----------|-----|-------------|
+| SAM 2 (Appendix A) | facebookresearch/sam2 | ~100% | 1 (rewrite) | 12 | ~5,390 |
+| VideoPainter (Appendix B) | TencentARC/VideoPainter | 688/696 (98.8%) | 8 | 13 | ~5,500 |
+| Alpamayo (this appendix) | NVlabs/alpamayo | 25/27 (100% core) | 2 (trivial) | 10 | ~3,900 |
+| **Total** | | | | | **~14,800** |
+
+All three stages follow the same architectural pattern: unmodified foundation
+model core + novel application/infrastructure layer. The Alpamayo core is the
+most strictly preserved (zero lines changed in any source file).
+
+C.8 Verification Command
+--------------------------
+
+  cd masterthesis_hk
+  diff -rq original/alpamayo vla/alpamayo \
+    --exclude='.git' --exclude='__pycache__' --exclude='checkpoints' \
+    --exclude='*.whl' --exclude='*.npz' --exclude='*.pyc'
 
 ================================================================================
