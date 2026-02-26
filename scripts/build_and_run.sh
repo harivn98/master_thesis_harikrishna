@@ -264,7 +264,11 @@ VP_LLM_MODEL="${VP_LLM_MODEL:-/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Ins
 #   PROMPT_IDS=123      → prompts 1, 2, 3
 #   PROMPT_IDS=15       → prompts 1 and 5
 #   PROMPT_IDS=12345    → all five (default)
-PROMPT_IDS="${PROMPT_IDS:-12345}"
+#
+# OR pass a custom prompt directly (when PROMPT_IDS is not set):
+#   CUSTOM_PROMPT='Your custom editing instruction here' bash scripts/build_and_run.sh
+PROMPT_IDS="${PROMPT_IDS:-}"
+CUSTOM_PROMPT="${CUSTOM_PROMPT:-flowers on the road}"
 
 
 
@@ -302,20 +306,38 @@ PROMPTS[3]='Single solid yellow continuous line, aligned exactly to the original
 PROMPTS[4]='Double solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged'
 PROMPTS[5]='Single dashed white intermitted line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged'
 
-# Build VIDEO_EDITING_INSTRUCTIONS from selected prompt IDs
+# Build VIDEO_EDITING_INSTRUCTIONS from selected prompt IDs or CUSTOM_PROMPT
 VIDEO_EDITING_INSTRUCTIONS=""
-for (( i=0; i<${#PROMPT_IDS}; i++ )); do
-  pid="${PROMPT_IDS:$i:1}"
-  if [[ -z "${PROMPTS[$pid]+x}" ]]; then
-    echo "ERROR: Invalid prompt ID '${pid}'. Valid IDs are 1-5."
+if [[ -n "${PROMPT_IDS}" ]]; then
+  # Use predefined prompts by ID
+  for (( i=0; i<${#PROMPT_IDS}; i++ )); do
+    pid="${PROMPT_IDS:$i:1}"
+    if [[ -z "${PROMPTS[$pid]+x}" ]]; then
+      echo "ERROR: Invalid prompt ID '${pid}'. Valid IDs are 1-5."
+      exit 1
+    fi
+    if [[ -n "${VIDEO_EDITING_INSTRUCTIONS}" ]]; then
+      VIDEO_EDITING_INSTRUCTIONS+=$'\n'
+    fi
+    VIDEO_EDITING_INSTRUCTIONS+="${PROMPTS[$pid]}"
+  done
+  NUM_PROMPTS=${#PROMPT_IDS}
+elif [[ -n "${CUSTOM_PROMPT}" ]]; then
+  # Use custom prompt directly
+  echo "Using CUSTOM_PROMPT: ${CUSTOM_PROMPT:0:80}…"
+  VIDEO_EDITING_INSTRUCTIONS="${CUSTOM_PROMPT}"
+  PROMPT_IDS="C"    # tag for run naming
+  NUM_PROMPTS=1
+else
+  if [[ ${RUN_VP} -eq 1 ]]; then
+    echo "ERROR: No prompt specified. Set PROMPT_IDS (e.g. 1, 123) or CUSTOM_PROMPT."
+    echo "  Examples:"
+    echo "    PROMPT_IDS=1 bash scripts/build_and_run.sh"
+    echo "    CUSTOM_PROMPT='Replace lane markings with red dashed lines' bash scripts/build_and_run.sh"
     exit 1
   fi
-  if [[ -n "${VIDEO_EDITING_INSTRUCTIONS}" ]]; then
-    VIDEO_EDITING_INSTRUCTIONS+=$'\n'
-  fi
-  VIDEO_EDITING_INSTRUCTIONS+="${PROMPTS[$pid]}"
-done
-NUM_PROMPTS=${#PROMPT_IDS}
+  NUM_PROMPTS=0
+fi
 
 # Determine LoRA mode (lora_scale > 0 ⇒ per-prompt checkpoint runs)
 USE_LORA=0
