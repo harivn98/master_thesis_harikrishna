@@ -69,7 +69,8 @@ RUN pip install --no-cache-dir --break-system-packages \
     "accelerate>=0.30.0" \
     safetensors \
     sentencepiece \
-    psutil
+    psutil \
+    einops
 
 # Copy HLX workflow wheel (reuse from project)
 COPY hlx_wf-2.4.2.dev9-py3-none-any.whl /workspace/sam3/
