@@ -70,7 +70,21 @@ RUN pip install --no-cache-dir --break-system-packages \
     safetensors \
     sentencepiece \
     psutil \
-    einops
+    einops \
+    decord \
+    scipy \
+    hydra-core \
+    omegaconf \
+    scikit-image \
+    scikit-learn \
+    matplotlib \
+    pandas \
+    pycocotools \
+    torchmetrics \
+    open-clip-torch \
+    submitit \
+    fvcore \
+    fairscale
 
 # Copy HLX workflow wheel (reuse from project)
 COPY hlx_wf-2.4.2.dev9-py3-none-any.whl /workspace/sam3/
