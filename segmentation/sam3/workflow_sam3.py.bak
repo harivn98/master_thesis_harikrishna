@@ -17,20 +17,76 @@ from typing import List, Optional
 from hlx.wf import DedicatedNode, Node, fuse_prefetch_metadata, task, workflow
 from hlx.wf.mounts import MOUNTPOINT, FuseBucket
 
-from config_sam3 import (
-    BASE_WORKDIR,
-    CONTAINER_IMAGE,
-    SAM3_BUCKET,
-    SAM3_CHECKPOINT_PREFIX,
-    SAM3_FUSE_MOUNT_NAME,
-    SAM3_FUSE_MOUNT_ROOT,
-    SAM3_OUTPUT_BUCKET_BASE,
-    SAM3_PREPROCESSED_BUCKET_BASE,
-    MOUNTED_CHECKPOINT_PATH,
-)
-from helpers_sam3 import _resolve_chunk_uri
-
 logger = logging.getLogger(__name__)
+
+# Container image
+CONTAINER_IMAGE_DEFAULT = "europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_sam3"
+CONTAINER_IMAGE = os.environ.get("SAM3_CONTAINER_IMAGE", f"{CONTAINER_IMAGE_DEFAULT}:latest")
+
+# Paths inside container
+BASE_WORKDIR = "/workspace/sam3"
+
+# GCS bucket paths for outputs
+SAM3_OUTPUT_BUCKET_BASE = os.environ.get(
+    "SAM3_OUTPUT_BASE",
+    "gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/outputs/sam3",
+)
+SAM3_PREPROCESSED_BUCKET_BASE = os.environ.get(
+    "SAM3_PREPROCESSED_OUTPUT_BASE",
+    "gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/outputs/preprocessed_data_vp",
+)
+
+# GCS bucket paths for checkpoints (mounted via FuseBucket)
+SAM3_BUCKET = "mbadas-sandbox-research-9bb9c7f"
+SAM3_CHECKPOINT_PREFIX = "workspace/user/hbaskar/Video_inpainting/sam3_checkpoint"
+
+SAM3_FUSE_MOUNT_NAME = "sam3-checkpoints"
+SAM3_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, SAM3_FUSE_MOUNT_NAME)
+MOUNTED_CHECKPOINT_PATH = os.path.join(SAM3_FUSE_MOUNT_ROOT, "checkpoints", "sam3.pt")
+
+
+def _resolve_chunk_uri(chunk_uri: str) -> List[str]:
+    """Resolve a chunks:// URI into a list of gs:// video file paths."""
+    from urllib.parse import urlparse, parse_qs
+    import gcsfs
+
+    parsed = urlparse(chunk_uri)
+    base_path = parsed.netloc + parsed.path
+    params = parse_qs(parsed.query)
+    chunk_start = int(params.get("start", [0])[0])
+    chunk_end = int(params.get("end", [0])[0])
+    per_chunk = int(params.get("per_chunk", [1])[0])
+
+    logger.info(
+        "Resolving chunks:// URI — base=%s, chunks %d–%d, %d files/chunk",
+        base_path, chunk_start, chunk_end, per_chunk,
+    )
+
+    fs = gcsfs.GCSFileSystem()
+    resolved: List[str] = []
+
+    for chunk_idx in range(chunk_start, chunk_end + 1):
+        chunk_folder = f"{base_path}/chunk_{chunk_idx:04d}"
+        try:
+            files = fs.ls(chunk_folder, detail=False)
+            mp4_files = sorted(f for f in files if f.endswith(".mp4"))
+            selected = mp4_files[:per_chunk]
+            for f in selected:
+                resolved.append(f"gs://{f}")
+            logger.info(
+                "  chunk_%04d: %d mp4 files found, selected %d",
+                chunk_idx, len(mp4_files), len(selected),
+            )
+        except FileNotFoundError:
+            logger.warning("  chunk_%04d: folder not found at %s — skipping", chunk_idx, chunk_folder)
+
+    logger.info("Resolved %d video files from %d chunks", len(resolved), chunk_end - chunk_start + 1)
+    if not resolved:
+        raise ValueError(
+            f"No video files found for chunks:// URI: {chunk_uri}. "
+            f"Checked {base_path}/chunk_NNNN/ for .mp4 files."
+        )
+    return resolved
 
 
 @task(
