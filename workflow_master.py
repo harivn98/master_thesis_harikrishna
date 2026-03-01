@@ -1,14 +1,14 @@
-"""Master Pipeline Orchestrator: SAM2 → VideoPainter → Alpamayo.
+"""Master Pipeline Orchestrator: SAM2/SAM3 → VideoPainter → Alpamayo.
 
 Chains three GPU stages sequentially inside a single HLX workflow:
 
-  Stage 1 — SAM2 Segmentation
+  Stage 1 — SAM2 or SAM3 Segmentation
       Input : raw driving videos (GCS / chunks:// URI)
       Output: binary masks + VideoPainter-preprocessed data
               gs://<bucket>/.../outputs/preprocessed_data_vp/<run_id>/
 
   Stage 2 — VideoPainter Editing
-      Input : SAM2 preprocessed data (masks + raw videos)
+      Input : SAM preprocessed data (masks + raw videos)
       Output: edited / inpainted videos
               gs://<bucket>/.../outputs/vp/<run_id>/
 
@@ -16,6 +16,17 @@ Chains three GPU stages sequentially inside a single HLX workflow:
       Input : VideoPainter edited videos
       Output: trajectory predictions + reasoning traces
               gs://<bucket>/.../outputs/alpamayo/<run_id>/
+
+Workflow variants (suffix a = SAM2, b = SAM3):
+    sam2_pipeline_wf   (123a)  SAM2 → VP → Alpamayo
+    sam3_pipeline_wf   (123b)  SAM3 → VP → Alpamayo
+    sam2_only_wf       (1a)    SAM2 only
+    sam3_only_wf       (1b)    SAM3 only
+    sam2_vp_wf         (12a)   SAM2 → VP
+    sam3_vp_wf         (12b)   SAM3 → VP
+    vp_only_wf         (2)     VP only
+    vp_alpamayo_wf     (23)    VP → Alpamayo
+    alpamayo_only_wf   (3)     Alpamayo only
 
 All three stages share a single ``run_id`` for end-to-end traceability.
 Each stage runs in its **own** container image (heavy ML deps are isolated)
@@ -48,6 +59,10 @@ SAM2_CONTAINER_IMAGE = os.environ.get(
     "SAM2_CONTAINER_IMAGE",
     "europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_sam2:latest",
 )
+SAM3_CONTAINER_IMAGE = os.environ.get(
+    "SAM3_CONTAINER_IMAGE",
+    "europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_sam3:latest",
+)
 VP_CONTAINER_IMAGE = os.environ.get(
     "VP_CONTAINER_IMAGE",
     "europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_vp:latest",
@@ -62,6 +77,21 @@ ALPAMAYO_CONTAINER_IMAGE = os.environ.get(
 # ==============================================================================
 SAM2_CKPT_PREFIX = "workspace/user/hbaskar/Video_inpainting/sam2_checkpoint"
 SAM2_FUSE_NAME   = "sam2-checkpoints"
+
+# ==============================================================================
+# STAGE 1 (alt) — SAM3 GCS / mount configuration
+# ==============================================================================
+SAM3_CKPT_PREFIX = "workspace/user/hbaskar/Video_inpainting/sam3_checkpoint"
+SAM3_FUSE_NAME   = "sam3-checkpoints"
+
+SAM3_OUTPUT_BASE = os.environ.get(
+    "SAM3_OUTPUT_BASE",
+    f"gs://{GCS_BUCKET}/workspace/user/hbaskar/outputs/sam3",
+)
+
+# Default SAM model selection (overridden by build_and_run.sh)
+SAM_MODEL = os.environ.get("SAM_MODEL", "sam2")
+SAM3_TEXT_PROMPT = os.environ.get("SAM3_TEXT_PROMPT", "road surface")
 
 SAM2_OUTPUT_BASE = os.environ.get(
     "SAM2_OUTPUT_BASE",
@@ -173,6 +203,75 @@ def sam2_stage(
     )
 
     logger.info("SAM2 stage completed.")
+    logger.info("  Summary (first 500 chars): %s", str(result)[:500])
+    return run_id
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  STAGE 1 (alt)  —  SAM3 Segmentation (Text-Prompted)
+# ══════════════════════════════════════════════════════════════════════════════
+@task(
+    compute=DedicatedNode(
+        node=Node.A100_80GB_1GPU,
+        ephemeral_storage="max",
+        max_duration="3d",
+    ),
+    container_image=SAM3_CONTAINER_IMAGE,
+    environment={
+        "PYTHONUNBUFFERED": "1",
+        "SAM3_OUTPUT_BASE": SAM3_OUTPUT_BASE,
+        "SAM3_PREPROCESSED_OUTPUT_BASE": SAM2_PREPROCESSED_OUTPUT_BASE,
+    },
+    mounts=[
+        FuseBucket(
+            bucket=GCS_BUCKET,
+            name=SAM3_FUSE_NAME,
+            prefix=SAM3_CKPT_PREFIX,
+        ),
+    ],
+)
+def sam3_stage(
+    run_id: str,
+    sam3_video_uris: str,
+    max_frames: int = 150,
+    text_prompt: str = "road surface",
+) -> str:
+    """Run SAM3 video segmentation with text prompting (Stage 1 of 3).
+
+    SAM3 uses text-based prompting instead of point-based prompting (SAM2),
+    enabling semantic understanding of what to segment.
+
+    Produces binary masks and VideoPainter-preprocessed data under
+    ``gs://…/outputs/preprocessed_data_vp/<run_id>/``.
+
+    Returns
+    -------
+    str
+        The *run_id* — passed to Stage 2 as ``data_run_id``.
+    """
+    import sys
+    sys.path.insert(0, "/workspace/sam3")
+    os.chdir("/workspace/sam3")
+
+    from workflow_sam3 import run_sam3_segmentation as _sam3_task  # type: ignore[import-not-found]
+    _sam3_fn = getattr(_sam3_task, "task_function", _sam3_task)
+
+    logger.info("=" * 80)
+    logger.info("MASTER PIPELINE — STAGE 1: SAM3 SEGMENTATION (Text-Prompted)")
+    logger.info("  run_id            = %s", run_id)
+    logger.info("  sam3_video_uris   = %s", sam3_video_uris)
+    logger.info("  max_frames        = %d", max_frames)
+    logger.info("  text_prompt       = %s", text_prompt)
+    logger.info("=" * 80)
+
+    result = _sam3_fn(
+        run_id=run_id,
+        sam3_video_uris=sam3_video_uris,
+        max_frames=max_frames,
+        text_prompt=text_prompt,
+    )
+
+    logger.info("SAM3 stage completed.")
     logger.info("  Summary (first 500 chars): %s", str(result)[:500])
     return run_id
 
@@ -354,116 +453,15 @@ def alpamayo_stage(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  MASTER WORKFLOW
+#  FULL PIPELINE WORKFLOWS  (123a / 123b)
 # ══════════════════════════════════════════════════════════════════════════════
+
 @workflow
-def master_pipeline_wf(
+def sam2_pipeline_wf(
     run_id: str,
     # ── Stage 1: SAM2 ────────────────────────────────────────────────────────
-    sam2_video_uris: str,
-    sam2_max_frames: int = 150,
-    # ── Stage 2: VideoPainter ─────────────────────────────────────────────────
-    vp_video_editing_instructions: str = (
-        "Single solid white continuous line, aligned exactly to the original "
-        "lane positions and perspective; keep road texture, lighting, and "
-        "shadows unchanged\n"
-        "Double solid white continuous line, aligned exactly to the original "
-        "lane positions and perspective; keep road texture, lighting, and "
-        "shadows unchanged\n"
-        "Single solid yellow continuous line, aligned exactly to the original "
-        "lane positions and perspective; keep road texture, lighting, and "
-        "shadows unchanged\n"
-        "Double solid yellow continuous line, aligned exactly to the original "
-        "lane positions and perspective; keep road texture, lighting, and "
-        "shadows unchanged\n"
-        "Single dashed white intermitted line, aligned exactly to the original "
-        "lane positions and perspective; keep road texture, lighting, and "
-        "shadows unchanged"
-    ),
-    vp_llm_model: str = "/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct",
-    vp_num_inference_steps: int = 70,
-    vp_guidance_scale: float = 6.0,
-    vp_strength: float = 1.0,
-    vp_caption_refine_iters: int = 10,
-    vp_caption_refine_temperature: float = 0.1,
-    vp_dilate_size: int = 8,  # Reduced to minimize border artifacts
-    vp_mask_feather: int = 4,  # Reduced for more precise masking
-    vp_keep_masked_pixels: bool = True,
-    vp_img_inpainting_lora_scale: float = 0.0,
-    vp_seed: int = 42,
-    # ── Stage 3: Alpamayo ─────────────────────────────────────────────────────
-    alp_model_id: str = "/workspace/alpamayo/checkpoints/alpamayo-r1-10b",
-    alp_num_traj_samples: int = 1,
-    alp_video_name: str = "auto",
-    alp_black_non_target_cameras: bool = True,
-) -> str:
-    """End-to-end pipeline: SAM2 → VideoPainter → Alpamayo.
-
-    A single ``run_id`` propagates through every stage so that GCS artefacts
-    are co-located and easy to trace:
-
-    =========  ====================================================
-    Stage      GCS output
-    =========  ====================================================
-    SAM2       ``gs://…/outputs/sam2/<run_id>/``
-    SAM2 (VP)  ``gs://…/outputs/preprocessed_data_vp/<run_id>/``
-    VP         ``gs://…/outputs/vp/<run_id>/``
-    Alpamayo   ``gs://…/outputs/alpamayo/<run_id>/``
-    =========  ====================================================
-
-    Data-dependency edges ensure strict sequential execution:
-
-      SAM2 ──(run_id)──▶ VP ──(gcs_path)──▶ Alpamayo
-    """
-    # Stage 1 — SAM2 Segmentation
-    # Returns the run_id; the promise creates the dependency for Stage 2.
-    sam2_run_id = sam2_stage(
-        run_id=run_id,
-        sam2_video_uris=sam2_video_uris,
-        max_frames=sam2_max_frames,
-    )
-
-    # Stage 2 — VideoPainter Editing
-    # data_run_id=sam2_run_id ensures VP waits for SAM2 to finish.
-    vp_output_path = vp_stage(
-        data_run_id=sam2_run_id,
-        output_run_id=run_id,
-        video_editing_instructions=vp_video_editing_instructions,
-        llm_model=vp_llm_model,
-        num_inference_steps=vp_num_inference_steps,
-        guidance_scale=vp_guidance_scale,
-        strength=vp_strength,
-        caption_refine_iters=vp_caption_refine_iters,
-        caption_refine_temperature=vp_caption_refine_temperature,
-        dilate_size=vp_dilate_size,
-        mask_feather=vp_mask_feather,
-        keep_masked_pixels=vp_keep_masked_pixels,
-        img_inpainting_lora_scale=vp_img_inpainting_lora_scale,
-        seed=vp_seed,
-    )
-
-    # Stage 3 — Alpamayo VLA Inference
-    # video_data_gcs_path=vp_output_path ensures Alpamayo waits for VP.
-    alp_output_path = alpamayo_stage(
-        video_data_gcs_path=vp_output_path,
-        output_run_id=run_id,
-        model_id=alp_model_id,
-        num_traj_samples=alp_num_traj_samples,
-        video_name=alp_video_name,
-        black_non_target_cameras=alp_black_non_target_cameras,
-    )
-
-    return alp_output_path
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  PARTIAL WORKFLOWS — Resume from a specific stage
-# ══════════════════════════════════════════════════════════════════════════════
-
-@workflow
-def vp_alpamayo_wf(
-    run_id: str,
-    sam2_data_run_id: str = "",
+    sam_video_uris: str = "",
+    sam_max_frames: int = 150,
     # ── Stage 2: VideoPainter ─────────────────────────────────────────────────
     vp_video_editing_instructions: str = (
         "Single solid white continuous line, aligned exactly to the original "
@@ -499,22 +497,180 @@ def vp_alpamayo_wf(
     alp_video_name: str = "auto",
     alp_black_non_target_cameras: bool = True,
 ) -> str:
-    """Resume pipeline from VideoPainter → Alpamayo (skip SAM2).
+    """SAM2 → VideoPainter → Alpamayo (123a)."""
+    sam_run_id = sam2_stage(
+        run_id=run_id,
+        sam2_video_uris=sam_video_uris,
+        max_frames=sam_max_frames,
+    )
 
-    Use when SAM2 has already produced preprocessed data under
-    ``gs://…/outputs/preprocessed_data_vp/<sam2_data_run_id>/``.
+    vp_output_path = vp_stage(
+        data_run_id=sam_run_id,
+        output_run_id=run_id,
+        video_editing_instructions=vp_video_editing_instructions,
+        llm_model=vp_llm_model,
+        num_inference_steps=vp_num_inference_steps,
+        guidance_scale=vp_guidance_scale,
+        strength=vp_strength,
+        caption_refine_iters=vp_caption_refine_iters,
+        caption_refine_temperature=vp_caption_refine_temperature,
+        dilate_size=vp_dilate_size,
+        mask_feather=vp_mask_feather,
+        keep_masked_pixels=vp_keep_masked_pixels,
+        img_inpainting_lora_scale=vp_img_inpainting_lora_scale,
+        seed=vp_seed,
+    )
+
+    alp_output_path = alpamayo_stage(
+        video_data_gcs_path=vp_output_path,
+        output_run_id=run_id,
+        model_id=alp_model_id,
+        num_traj_samples=alp_num_traj_samples,
+        video_name=alp_video_name,
+        black_non_target_cameras=alp_black_non_target_cameras,
+    )
+
+    return alp_output_path
+
+
+@workflow
+def sam3_pipeline_wf(
+    run_id: str,
+    # ── Stage 1: SAM3 ────────────────────────────────────────────────────────
+    sam_video_uris: str = "",
+    sam_max_frames: int = 150,
+    sam3_text_prompt: str = "road surface",
+    # ── Stage 2: VideoPainter ─────────────────────────────────────────────────
+    vp_video_editing_instructions: str = (
+        "Single solid white continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Double solid white continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Single solid yellow continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Double solid yellow continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Single dashed white intermitted line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged"
+    ),
+    vp_llm_model: str = "/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct",
+    vp_num_inference_steps: int = 70,
+    vp_guidance_scale: float = 6.0,
+    vp_strength: float = 1.0,
+    vp_caption_refine_iters: int = 10,
+    vp_caption_refine_temperature: float = 0.1,
+    vp_dilate_size: int = 8,
+    vp_mask_feather: int = 4,
+    vp_keep_masked_pixels: bool = True,
+    vp_img_inpainting_lora_scale: float = 0.0,
+    vp_seed: int = 42,
+    # ── Stage 3: Alpamayo ─────────────────────────────────────────────────────
+    alp_model_id: str = "/workspace/alpamayo/checkpoints/alpamayo-r1-10b",
+    alp_num_traj_samples: int = 1,
+    alp_video_name: str = "auto",
+    alp_black_non_target_cameras: bool = True,
+) -> str:
+    """SAM3 → VideoPainter → Alpamayo (123b)."""
+    sam_run_id = sam3_stage(
+        run_id=run_id,
+        sam3_video_uris=sam_video_uris,
+        max_frames=sam_max_frames,
+        text_prompt=sam3_text_prompt,
+    )
+
+    vp_output_path = vp_stage(
+        data_run_id=sam_run_id,
+        output_run_id=run_id,
+        video_editing_instructions=vp_video_editing_instructions,
+        llm_model=vp_llm_model,
+        num_inference_steps=vp_num_inference_steps,
+        guidance_scale=vp_guidance_scale,
+        strength=vp_strength,
+        caption_refine_iters=vp_caption_refine_iters,
+        caption_refine_temperature=vp_caption_refine_temperature,
+        dilate_size=vp_dilate_size,
+        mask_feather=vp_mask_feather,
+        keep_masked_pixels=vp_keep_masked_pixels,
+        img_inpainting_lora_scale=vp_img_inpainting_lora_scale,
+        seed=vp_seed,
+    )
+
+    alp_output_path = alpamayo_stage(
+        video_data_gcs_path=vp_output_path,
+        output_run_id=run_id,
+        model_id=alp_model_id,
+        num_traj_samples=alp_num_traj_samples,
+        video_name=alp_video_name,
+        black_non_target_cameras=alp_black_non_target_cameras,
+    )
+
+    return alp_output_path
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  PARTIAL WORKFLOWS — Resume from a specific stage
+# ══════════════════════════════════════════════════════════════════════════════
+
+@workflow
+def vp_alpamayo_wf(
+    run_id: str,
+    sam_data_run_id: str = "",
+    # ── Stage 2: VideoPainter ─────────────────────────────────────────────────
+    vp_video_editing_instructions: str = (
+        "Single solid white continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Double solid white continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Single solid yellow continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Double solid yellow continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Single dashed white intermitted line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged"
+    ),
+    vp_llm_model: str = "/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct",
+    vp_num_inference_steps: int = 70,
+    vp_guidance_scale: float = 6.0,
+    vp_strength: float = 1.0,
+    vp_caption_refine_iters: int = 10,
+    vp_caption_refine_temperature: float = 0.1,
+    vp_dilate_size: int = 8,
+    vp_mask_feather: int = 4,
+    vp_keep_masked_pixels: bool = True,
+    vp_img_inpainting_lora_scale: float = 0.0,
+    vp_seed: int = 42,
+    # ── Stage 3: Alpamayo ─────────────────────────────────────────────────────
+    alp_model_id: str = "/workspace/alpamayo/checkpoints/alpamayo-r1-10b",
+    alp_num_traj_samples: int = 1,
+    alp_video_name: str = "auto",
+    alp_black_non_target_cameras: bool = True,
+) -> str:
+    """Resume pipeline from VideoPainter → Alpamayo (skip SAM).
+
+    Use when SAM2/SAM3 has already produced preprocessed data under
+    ``gs://…/outputs/preprocessed_data_vp/<sam_data_run_id>/``.
 
     Parameters
     ----------
     run_id
         Run ID for this execution (used for VP + Alpamayo output paths).
-    sam2_data_run_id
-        The run_id of the *previous* SAM2 execution whose preprocessed
+    sam_data_run_id
+        The run_id of the *previous* SAM2/SAM3 execution whose preprocessed
         data should be consumed.  Must be provided (non-empty).
     """
     # Stage 2 — VideoPainter Editing
     vp_output_path = vp_stage(
-        data_run_id=sam2_data_run_id,
+        data_run_id=sam_data_run_id,
         output_run_id=run_id,
         video_editing_instructions=vp_video_editing_instructions,
         llm_model=vp_llm_model,
@@ -546,29 +702,38 @@ def vp_alpamayo_wf(
 @workflow
 def sam2_only_wf(
     run_id: str,
-    sam2_video_uris: str,
-    sam2_max_frames: int = 150,
+    sam_video_uris: str = "",
+    sam_max_frames: int = 150,
 ) -> str:
-    """Run SAM2 segmentation only (Stage 1).
-
-    Returns
-    -------
-    str
-        The *run_id* of the SAM2 output.
-    """
-    sam2_run_id = sam2_stage(
+    """Run SAM2 segmentation only (1a)."""
+    return sam2_stage(
         run_id=run_id,
-        sam2_video_uris=sam2_video_uris,
-        max_frames=sam2_max_frames,
+        sam2_video_uris=sam_video_uris,
+        max_frames=sam_max_frames,
     )
-    return sam2_run_id
+
+
+@workflow
+def sam3_only_wf(
+    run_id: str,
+    sam_video_uris: str = "",
+    sam_max_frames: int = 150,
+    sam3_text_prompt: str = "road surface",
+) -> str:
+    """Run SAM3 segmentation only (1b)."""
+    return sam3_stage(
+        run_id=run_id,
+        sam3_video_uris=sam_video_uris,
+        max_frames=sam_max_frames,
+        text_prompt=sam3_text_prompt,
+    )
 
 
 @workflow
 def sam2_vp_wf(
     run_id: str,
-    sam2_video_uris: str,
-    sam2_max_frames: int = 150,
+    sam_video_uris: str = "",
+    sam_max_frames: int = 150,
     # ── Stage 2: VideoPainter ─────────────────────────────────────────────────
     vp_video_editing_instructions: str = (
         "Single solid white continuous line, aligned exactly to the original "
@@ -599,21 +764,79 @@ def sam2_vp_wf(
     vp_img_inpainting_lora_scale: float = 0.0,
     vp_seed: int = 42,
 ) -> str:
-    """Run SAM2 → VideoPainter (Stages 1+2, skip Alpamayo).
-
-    Returns
-    -------
-    str
-        GCS path to the VP edited videos.
-    """
-    sam2_run_id = sam2_stage(
+    """SAM2 → VideoPainter (12a)."""
+    sam_run_id = sam2_stage(
         run_id=run_id,
-        sam2_video_uris=sam2_video_uris,
-        max_frames=sam2_max_frames,
+        sam2_video_uris=sam_video_uris,
+        max_frames=sam_max_frames,
     )
 
     vp_output_path = vp_stage(
-        data_run_id=sam2_run_id,
+        data_run_id=sam_run_id,
+        output_run_id=run_id,
+        video_editing_instructions=vp_video_editing_instructions,
+        llm_model=vp_llm_model,
+        num_inference_steps=vp_num_inference_steps,
+        guidance_scale=vp_guidance_scale,
+        strength=vp_strength,
+        caption_refine_iters=vp_caption_refine_iters,
+        caption_refine_temperature=vp_caption_refine_temperature,
+        dilate_size=vp_dilate_size,
+        mask_feather=vp_mask_feather,
+        keep_masked_pixels=vp_keep_masked_pixels,
+        img_inpainting_lora_scale=vp_img_inpainting_lora_scale,
+        seed=vp_seed,
+    )
+
+    return vp_output_path
+
+
+@workflow
+def sam3_vp_wf(
+    run_id: str,
+    sam_video_uris: str = "",
+    sam_max_frames: int = 150,
+    sam3_text_prompt: str = "road surface",
+    # ── Stage 2: VideoPainter ─────────────────────────────────────────────────
+    vp_video_editing_instructions: str = (
+        "Single solid white continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Double solid white continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Single solid yellow continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Double solid yellow continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Single dashed white intermitted line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged"
+    ),
+    vp_llm_model: str = "/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct",
+    vp_num_inference_steps: int = 70,
+    vp_guidance_scale: float = 6.0,
+    vp_strength: float = 1.0,
+    vp_caption_refine_iters: int = 10,
+    vp_caption_refine_temperature: float = 0.1,
+    vp_dilate_size: int = 8,
+    vp_mask_feather: int = 4,
+    vp_keep_masked_pixels: bool = True,
+    vp_img_inpainting_lora_scale: float = 0.0,
+    vp_seed: int = 42,
+) -> str:
+    """SAM3 → VideoPainter (12b)."""
+    sam_run_id = sam3_stage(
+        run_id=run_id,
+        sam3_video_uris=sam_video_uris,
+        max_frames=sam_max_frames,
+        text_prompt=sam3_text_prompt,
+    )
+
+    vp_output_path = vp_stage(
+        data_run_id=sam_run_id,
         output_run_id=run_id,
         video_editing_instructions=vp_video_editing_instructions,
         llm_model=vp_llm_model,
@@ -635,7 +858,7 @@ def sam2_vp_wf(
 @workflow
 def vp_only_wf(
     run_id: str,
-    sam2_data_run_id: str = "",
+    sam_data_run_id: str = "",
     # ── Stage 2: VideoPainter ─────────────────────────────────────────────────
     vp_video_editing_instructions: str = (
         "Single solid white continuous line, aligned exactly to the original "
@@ -666,16 +889,16 @@ def vp_only_wf(
     vp_img_inpainting_lora_scale: float = 0.0,
     vp_seed: int = 42,
 ) -> str:
-    """Run VideoPainter only (Stage 2, skip SAM2 + Alpamayo).
+    """Run VideoPainter only (Stage 2, skip SAM + Alpamayo).
 
     Parameters
     ----------
-    sam2_data_run_id
-        The run_id of a previous SAM2 execution whose preprocessed data
-        is at ``gs://…/outputs/preprocessed_data_vp/<sam2_data_run_id>/``.
+    sam_data_run_id
+        The run_id of a previous SAM2/SAM3 execution whose preprocessed data
+        is at ``gs://…/outputs/preprocessed_data_vp/<sam_data_run_id>/``.
     """
     vp_output_path = vp_stage(
-        data_run_id=sam2_data_run_id,
+        data_run_id=sam_data_run_id,
         output_run_id=run_id,
         video_editing_instructions=vp_video_editing_instructions,
         llm_model=vp_llm_model,
@@ -704,7 +927,7 @@ def alpamayo_only_wf(
     alp_video_name: str = "auto",
     alp_black_non_target_cameras: bool = True,
 ) -> str:
-    """Resume pipeline from Alpamayo only (skip SAM2 + VideoPainter).
+    """Resume pipeline from Alpamayo only (skip SAM + VideoPainter).
 
     Parameters
     ----------

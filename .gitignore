@@ -9,6 +9,8 @@
 # Ignore local wheel artifact
 /generation/VideoPainter/hlx_wf-2.4.2.dev9-py3-none-any.whl
 /segmentation/sam2/hlx_wf-2.4.2.dev9-py3-none-any.whl
+/segmentation/sam3/hlx_wf-2.4.2.dev9-py3-none-any.whl
+/segmentation/sam3/sam3_download.sh
 
 # Common Python noise
 **/__pycache__/

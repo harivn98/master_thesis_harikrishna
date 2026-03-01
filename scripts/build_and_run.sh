@@ -44,8 +44,29 @@ cd "${REPO_ROOT}"
 GCS_BUCKET="mbadas-sandbox-research-9bb9c7f"
 
 RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RUN_ID="${RUN_ID:-}"
+RUN_ID="${RUN_ID:-sam3}"
 MASTER_RUN_ID="${RUN_ID}_${RUN_TIMESTAMP}"
+
+STAGES="${STAGES:-123b}"         # default: full pipeline with SAM3
+
+# ── Derive SAM model from STAGES suffix (a=sam2, b=sam3) ─────────────────────
+STAGES_NUM="${STAGES//[ab]/}"    # strip suffix → pure digits (e.g. 123b → 123)
+STAGES_SUFFIX="${STAGES//[0-9]/}" # strip digits → suffix only (e.g. 123b → b)
+
+if [[ "${STAGES_SUFFIX}" == "a" ]]; then
+    SAM_MODEL="sam2"
+elif [[ "${STAGES_SUFFIX}" == "b" ]]; then
+    SAM_MODEL="sam3"
+elif [[ -z "${STAGES_SUFFIX}" ]]; then
+    # No suffix — stages without SAM (2, 23, 3)
+    SAM_MODEL="none"
+else
+    echo "ERROR: STAGES='${STAGES}' has invalid suffix '${STAGES_SUFFIX}'. Use 'a' (SAM2) or 'b' (SAM3)."
+    exit 1
+fi
+
+# SAM3 text prompt for concept-based segmentation (only used when SAM_MODEL=sam3)
+SAM3_TEXT_PROMPT="${SAM3_TEXT_PROMPT:-road surface}"
 
 
 
@@ -62,19 +83,27 @@ MASTER_RUN_ID="${RUN_ID}_${RUN_TIMESTAMP}"
 
 # ===============================================================================
 # MODEL CHECKPOINT GCS FOLDER PATHS (Mounted folders in containers)
+# These must match the FuseBucket prefixes used in workflow_master.py
 # ===============================================================================
 
-# GCS folder for SAM2 model checkpoints
-SAM2_MODEL_GCS_CKPT_FOLDER="gs://${GCS_BUCKET}/workspace/user/hbaskar/Checkpoints/sam2"
+# GCS folder for SAM2 model checkpoints (workflow_master.py → SAM2_CKPT_PREFIX)
+SAM2_MODEL_GCS_CKPT_FOLDER="gs://${GCS_BUCKET}/workspace/user/hbaskar/Video_inpainting/sam2_checkpoint"
 
-# GCS folder for VideoPainter model checkpoints (main model)
-VIDEOPAINTER_MODEL_GCS_CKPT_FOLDER="gs://${GCS_BUCKET}/workspace/user/hbaskar/Checkpoints/videopainter"
+# GCS folder for SAM3 model checkpoints (workflow_master.py → SAM3_CKPT_PREFIX)
+# SAM3 downloads from HuggingFace by default; this folder is for custom checkpoints
+SAM3_MODEL_GCS_CKPT_FOLDER="gs://${GCS_BUCKET}/workspace/user/hbaskar/Video_inpainting/sam3_checkpoint"
+
+# GCS folder for VideoPainter model checkpoints (workflow_master.py → VP_BUCKET_PREFIX)
+VIDEOPAINTER_MODEL_GCS_CKPT_FOLDER="gs://${GCS_BUCKET}/workspace/user/hbaskar/Video_inpainting/videopainter"
+
+# GCS folder for VideoPainter VLM (Qwen) checkpoint (workflow_master.py → VLM_7B_GCS_PREFIX)
+VIDEOPAINTER_VLM_GCS_CKPT_FOLDER="gs://${GCS_BUCKET}/workspace/user/hbaskar/Video_inpainting/videopainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct"
 
 # GCS folder for VideoPainter LoRA checkpoints (per-prompt)
 VIDEOPAINTER_LORA_GCS_CKPT_FOLDER="gs://${GCS_BUCKET}/workspace/user/hbaskar/Video_inpainting/videopainter/training/trained_checkpoint"
 
-# GCS folder for Alpamayo model checkpoints
-ALPAMAYO_MODEL_GCS_CKPT_FOLDER="gs://${GCS_BUCKET}/workspace/user/hbaskar/Checkpoints/alpamayo"
+# GCS folder for Alpamayo model checkpoints (workflow_master.py → ALPAMAYO_CKPT_PREFIX)
+ALPAMAYO_MODEL_GCS_CKPT_FOLDER="gs://${GCS_BUCKET}/workspace/user/hbaskar/Video_inpainting/vla/alpamayo/checkpoints"
 
 
 
@@ -110,10 +139,12 @@ ALPAMAYO_MODEL_GCS_CKPT_FOLDER="gs://${GCS_BUCKET}/workspace/user/hbaskar/Checkp
 # INPUT CONFIGURATION — set these before running
 # ==============================================================================
 
-# ── Stage selection (1=SAM2, 2=VP, 3=Alpamayo; combine: 12, 23, 123) ─────────
-STAGES="${STAGES:-123}"
+# ── Stage selection ─
+# Suffix a = SAM2, b = SAM3 (for stages that include SAM):
+#   1a, 1b, 12a, 12b, 123a, 123b
+# Stages without SAM need no suffix: 2, 23, 3
 
-# ── Stage 1 (SAM2) inputs ────────────────────────────────────────────────────
+# ── Stage 1 (SAM2/SAM3) inputs ───────────────────────────────────────────────
 SAM2_CHUNK_START="${SAM2_CHUNK_START:-1}"
 SAM2_CHUNK_END="${SAM2_CHUNK_END:-1}"
 SAM2_FILES_PER_CHUNK="${SAM2_FILES_PER_CHUNK:-1}"
@@ -163,22 +194,37 @@ VP_DATA_RUN_ID="${VP_DATA_RUN_ID:-}"
 
 
 
-# Parse which stages are active
-RUN_SAM2=0; RUN_VP=0; RUN_ALP=0
-[[ "${STAGES}" == *1* ]] && RUN_SAM2=1
-[[ "${STAGES}" == *2* ]] && RUN_VP=1
-[[ "${STAGES}" == *3* ]] && RUN_ALP=1
+# Parse which stages are active (use STAGES_NUM, the numeric part)
+RUN_SAM2=0; RUN_SAM3=0; RUN_SAM=0; RUN_VP=0; RUN_ALP=0
+if [[ "${STAGES_NUM}" == *1* ]]; then
+    RUN_SAM=1
+    if [[ "${SAM_MODEL}" == "sam3" ]]; then
+        RUN_SAM3=1
+    elif [[ "${SAM_MODEL}" == "sam2" ]]; then
+        RUN_SAM2=1
+    fi
+fi
+[[ "${STAGES_NUM}" == *2* ]] && RUN_VP=1
+[[ "${STAGES_NUM}" == *3* ]] && RUN_ALP=1
 
-# Validate STAGES contains only 1, 2, 3
-if [[ ! "${STAGES}" =~ ^[123]+$ ]]; then
-    echo "ERROR: STAGES='${STAGES}' is invalid. Use digits 1, 2, 3 (e.g. 1, 12, 23, 123)."
+# Validate STAGES format: digits + optional a/b suffix
+if [[ ! "${STAGES}" =~ ^[123]+[ab]?$ ]]; then
+    echo "ERROR: STAGES='${STAGES}' is invalid."
+    echo "       Use: 1a, 1b, 12a, 12b, 123a, 123b, 2, 23, 3"
+    exit 1
+fi
+
+# Stages that include SAM (1) must have a/b suffix
+if [[ ${RUN_SAM} -eq 1 && -z "${STAGES_SUFFIX}" ]]; then
+    echo "ERROR: STAGES='${STAGES}' includes SAM (1) but has no suffix."
+    echo "       Use 'a' for SAM2 or 'b' for SAM3 (e.g. 1a, 12b, 123a)."
     exit 1
 fi
 
 # ── Input folder dependency checks ───────────────────────────────────────────
-if [[ ${RUN_VP} -eq 1 && ${RUN_SAM2} -eq 0 && -z "${SAM2_DATA_RUN_ID}" ]]; then
-    echo "ERROR: STAGES=${STAGES} includes VP (2) without SAM2 (1)."
-    echo "       You must set SAM2_DATA_RUN_ID (the SAM2 output folder name)."
+if [[ ${RUN_VP} -eq 1 && ${RUN_SAM} -eq 0 && -z "${SAM2_DATA_RUN_ID}" ]]; then
+    echo "ERROR: STAGES=${STAGES} includes VP (2) without SAM (1)."
+    echo "       You must set SAM2_DATA_RUN_ID (the SAM output folder name)."
     echo "       Example: SAM2_DATA_RUN_ID=003_20260217_162441 STAGES=${STAGES} bash scripts/build_and_run.sh"
     exit 1
 fi
@@ -191,7 +237,7 @@ if [[ ${RUN_ALP} -eq 1 && ${RUN_VP} -eq 0 && -z "${VP_DATA_RUN_ID}" ]]; then
 fi
 
 # ==============================================================================
-# STAGE 1: SAM2 CONFIGURATION
+# STAGE 1: SAM SEGMENTATION CONFIGURATION (SAM2 or SAM3)
 # ==============================================================================
 SAM2_INPUT_PARENT="${SAM2_INPUT_PARENT:-gs://${GCS_BUCKET}/workspace/user/hbaskar/Input/data_physical_ai}"
 SAM2_CAMERA_SUBFOLDER="${SAM2_CAMERA_SUBFOLDER:-camera_front_tele_30fov}"
@@ -202,6 +248,9 @@ SAM2_VIDEO_URIS="${SAM2_VIDEO_URIS:-chunks://${SAM2_INPUT_BASE#gs://}?start=${SA
 
 SAM2_OUTPUT_BASE="${SAM2_OUTPUT_BASE:-gs://${GCS_BUCKET}/workspace/user/hbaskar/outputs/sam2}"
 SAM2_PREPROCESSED_OUTPUT_BASE="${SAM2_PREPROCESSED_OUTPUT_BASE:-gs://${GCS_BUCKET}/workspace/user/hbaskar/outputs/preprocessed_data_vp}"
+
+# SAM3-specific output base (raw sam3 outputs separate from sam2)
+SAM3_OUTPUT_BASE="${SAM3_OUTPUT_BASE:-gs://${GCS_BUCKET}/workspace/user/hbaskar/outputs/sam3}"
 
 # Calculate expected video count for display
 SAM2_TOTAL_CHUNKS=$(( SAM2_CHUNK_END - SAM2_CHUNK_START + 1 ))
@@ -305,7 +354,7 @@ VP_LLM_MODEL="${VP_LLM_MODEL:-/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Ins
 #
 # OR pass a custom prompt directly (when PROMPT_IDS is not set):
 #   CUSTOM_PROMPT='Your custom editing instruction here' bash scripts/build_and_run.sh
-PROMPT_IDS="${PROMPT_IDS:-}"
+PROMPT_IDS="${PROMPT_IDS:-4}"
 CUSTOM_PROMPT="${CUSTOM_PROMPT:-}"
 
 
@@ -489,6 +538,9 @@ REGISTRY="europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research"
 SAM2_LOCAL_IMAGE="sam2/frontend"
 SAM2_REMOTE_IMAGE="${REGISTRY}/harimt_sam2_${MASTER_RUN_ID}"
 
+SAM3_LOCAL_IMAGE="sam3/frontend"
+SAM3_REMOTE_IMAGE="${REGISTRY}/harimt_sam3_${MASTER_RUN_ID}"
+
 VP_LOCAL_IMAGE="videopainter:latest"
 VP_REMOTE_IMAGE="${REGISTRY}/harimt_vp${VP_RUN_SUFFIX}_${MASTER_RUN_ID}"
 
@@ -500,6 +552,7 @@ MASTER_REMOTE_IMAGE="${REGISTRY}/master_pipeline_${MASTER_RUN_ID}"
 
 # Tagged with the shared run id
 SAM2_TAGGED="${SAM2_REMOTE_IMAGE}:${MASTER_RUN_ID}"
+SAM3_TAGGED="${SAM3_REMOTE_IMAGE}:${MASTER_RUN_ID}"
 VP_TAGGED="${VP_REMOTE_IMAGE}:${MASTER_RUN_ID}"
 ALP_TAGGED="${ALP_REMOTE_IMAGE}:${MASTER_RUN_ID}"
 MASTER_TAGGED="${MASTER_REMOTE_IMAGE}:${MASTER_RUN_ID}"
@@ -509,7 +562,7 @@ MASTER_TAGGED="${MASTER_REMOTE_IMAGE}:${MASTER_RUN_ID}"
 # ==============================================================================
 # Build a human-readable label for the selected stages
 STAGES_LABEL=""
-[[ ${RUN_SAM2} -eq 1 ]] && STAGES_LABEL="SAM2"
+[[ ${RUN_SAM} -eq 1 ]] && STAGES_LABEL="${SAM_MODEL^^}"  # uppercase SAM2 or SAM3
 [[ ${RUN_VP} -eq 1 ]]   && STAGES_LABEL="${STAGES_LABEL:+${STAGES_LABEL} → }VideoPainter"
 [[ ${RUN_ALP} -eq 1 ]]  && STAGES_LABEL="${STAGES_LABEL:+${STAGES_LABEL} → }Alpamayo"
 
@@ -521,7 +574,8 @@ echo "  RUN_ID:             ${RUN_ID}"
 echo "  MASTER_RUN_ID:      ${MASTER_RUN_ID}"
 echo "  TIMESTAMP:          ${RUN_TIMESTAMP}"
 echo "  STAGES:             ${STAGES}  (${STAGES_LABEL})"
-if [[ ${RUN_VP} -eq 1 && ${RUN_SAM2} -eq 0 ]]; then
+echo "  SAM_MODEL:          ${SAM_MODEL}"
+if [[ ${RUN_VP} -eq 1 && ${RUN_SAM} -eq 0 ]]; then
     echo "  SAM2_DATA_RUN_ID:   ${SAM2_DATA_RUN_ID}  (reusing SAM2 output)"
 fi
 if [[ ${RUN_ALP} -eq 1 && ${RUN_VP} -eq 0 ]]; then
@@ -529,23 +583,30 @@ if [[ ${RUN_ALP} -eq 1 && ${RUN_VP} -eq 0 ]]; then
 fi
 echo ""
 
-if [[ ${RUN_SAM2} -eq 1 ]]; then
-    echo " ── Stage 1: SAM2 Segmentation ──────────────────────────────────────────────"
+if [[ ${RUN_SAM} -eq 1 ]]; then
+    echo " ── Stage 1: ${SAM_MODEL^^} Segmentation ───────────────────────────────────────────"
+    echo "  Model:              ${SAM_MODEL}"
     echo "  Input:              chunks ${SAM2_CHUNK_START}–${SAM2_CHUNK_END} (${SAM2_TOTAL_CHUNKS} chunks × ${SAM2_FILES_PER_CHUNK} files ≈ ${SAM2_EXPECTED_VIDEOS} videos)"
     echo "  Input base:         ${SAM2_INPUT_BASE}"
     echo "  Max frames:         ${SAM2_MAX_FRAMES}"
-    echo "  SAM2 output:        ${SAM2_OUTPUT_BASE}/${MASTER_RUN_ID}/"
+    if [[ "${SAM_MODEL}" == "sam3" ]]; then
+        echo "  Text prompt:        ${SAM3_TEXT_PROMPT}"
+        echo "  SAM3 output:        ${SAM3_OUTPUT_BASE}/${MASTER_RUN_ID}/"
+        echo "  Docker image:       ${SAM3_TAGGED}"
+    else
+        echo "  SAM2 output:        ${SAM2_OUTPUT_BASE}/${MASTER_RUN_ID}/"
+        echo "  Docker image:       ${SAM2_TAGGED}"
+    fi
     echo "  Preprocessed (→VP): ${SAM2_PREPROCESSED_OUTPUT_BASE}/${MASTER_RUN_ID}/"
-    echo "  Docker image:       ${SAM2_TAGGED}"
     echo ""
 fi
 
 if [[ ${RUN_VP} -eq 1 ]]; then
     echo " ── Stage 2: VideoPainter Editing ────────────────────────────────────────────"
-    if [[ ${RUN_SAM2} -eq 1 ]]; then
-        echo "  Input (from SAM2):  ${SAM2_PREPROCESSED_OUTPUT_BASE}/${MASTER_RUN_ID}/  (auto from Stage 1)"
+    if [[ ${RUN_SAM} -eq 1 ]]; then
+        echo "  Input (from ${SAM_MODEL^^}):  ${SAM2_PREPROCESSED_OUTPUT_BASE}/${MASTER_RUN_ID}/  (auto from Stage 1)"
     else
-        echo "  Input (SAM2 data):  ${SAM2_PREPROCESSED_OUTPUT_BASE}/${SAM2_DATA_RUN_ID}/"
+        echo "  Input (SAM data):   ${SAM2_PREPROCESSED_OUTPUT_BASE}/${SAM2_DATA_RUN_ID}/"
     fi
     echo "  VP output:          ${VP_OUTPUT_BASE}/${MASTER_RUN_ID}/"
     echo "  LoRA mode:          $(if [[ ${USE_LORA} -eq 1 ]]; then echo "ON (scale=${VP_IMG_INPAINTING_LORA_SCALE})"; else echo "OFF"; fi)"
@@ -591,19 +652,31 @@ echo ""
 echo "Building and pushing Docker images …"
 echo ""
 
-# ── Stage 1: SAM2 ─────────────────────────────────────────────────────────
-if [[ ${RUN_SAM2} -eq 1 ]]; then
-    echo "▸ Building SAM2 image …"
-    pushd segmentation/sam2 > /dev/null
-    docker compose build
-    docker tag "${SAM2_LOCAL_IMAGE}" "${SAM2_TAGGED}"
-    docker tag "${SAM2_LOCAL_IMAGE}" "${SAM2_REMOTE_IMAGE}:latest"
-    docker push "${SAM2_TAGGED}"
-    docker push "${SAM2_REMOTE_IMAGE}:latest"
-    popd > /dev/null
-    echo "  ✓ SAM2 image pushed: ${SAM2_TAGGED}"
+# ── Stage 1: SAM Segmentation (SAM2 or SAM3) ───────────────────────────────
+if [[ ${RUN_SAM} -eq 1 ]]; then
+    if [[ "${SAM_MODEL}" == "sam3" ]]; then
+        echo "▸ Building SAM3 image …"
+        pushd segmentation/sam3 > /dev/null
+        docker compose build
+        docker tag "${SAM3_LOCAL_IMAGE}" "${SAM3_TAGGED}"
+        docker tag "${SAM3_LOCAL_IMAGE}" "${SAM3_REMOTE_IMAGE}:latest"
+        docker push "${SAM3_TAGGED}"
+        docker push "${SAM3_REMOTE_IMAGE}:latest"
+        popd > /dev/null
+        echo "  ✓ SAM3 image pushed: ${SAM3_TAGGED}"
+    else
+        echo "▸ Building SAM2 image …"
+        pushd segmentation/sam2 > /dev/null
+        docker compose build
+        docker tag "${SAM2_LOCAL_IMAGE}" "${SAM2_TAGGED}"
+        docker tag "${SAM2_LOCAL_IMAGE}" "${SAM2_REMOTE_IMAGE}:latest"
+        docker push "${SAM2_TAGGED}"
+        docker push "${SAM2_REMOTE_IMAGE}:latest"
+        popd > /dev/null
+        echo "  ✓ SAM2 image pushed: ${SAM2_TAGGED}"
+    fi
 else
-    echo "  ⏭ SAM2 build skipped (not in STAGES=${STAGES})"
+    echo "  ⏭ SAM build skipped (not in STAGES=${STAGES})"
 fi
 
 # ── Stage 2: VideoPainter ─────────────────────────────────────────────────
@@ -637,7 +710,7 @@ else
 fi
 
 # ── Master orchestrator (only needed for multi-stage pipelines) ───────────
-if [[ ${#STAGES} -gt 1 ]]; then
+if [[ ${#STAGES_NUM} -gt 1 ]]; then
     echo "▸ Building Master orchestrator image …"
     docker compose build
     docker tag "${MASTER_LOCAL_IMAGE}" "${MASTER_TAGGED}"
@@ -646,22 +719,26 @@ if [[ ${#STAGES} -gt 1 ]]; then
     docker push "${MASTER_REMOTE_IMAGE}:latest"
     echo "  ✓ Master image pushed: ${MASTER_TAGGED}"
 else
-    echo "  ⏭ Master orchestrator build skipped (single-stage STAGES=${STAGES})"
+    echo "  ⏭ Master orchestrator build skipped (single-stage STAGES_NUM=${STAGES_NUM})"
 fi
 
 # ==============================================================================
 # EXPORT ENV VARS FOR WORKFLOW SERIALISATION
 # ==============================================================================
 export SAM2_CONTAINER_IMAGE="${SAM2_TAGGED}"
+export SAM3_CONTAINER_IMAGE="${SAM3_TAGGED}"
 export VP_CONTAINER_IMAGE="${VP_TAGGED}"
 export ALPAMAYO_CONTAINER_IMAGE="${ALP_TAGGED}"
 export SAM2_OUTPUT_BASE
+export SAM3_OUTPUT_BASE
 export SAM2_PREPROCESSED_OUTPUT_BASE
 export VP_OUTPUT_BASE
 export TRAINED_FLUXFILL_GCS_PATH
 export ALPAMAYO_OUTPUT_BASE
 export HF_TOKEN
 export STAGES
+export SAM_MODEL
+export SAM3_TEXT_PROMPT
 
 # ==============================================================================
 # SUBMIT MASTER WORKFLOW
@@ -716,8 +793,14 @@ submit_workflow() {
     local _run_id="$1"         # unique run id for this submission
     local _prompt_tag="$2"     # short tag for execution-name (e.g. "p3")
 
+    # Build SAM3-specific args if needed
+    local SAM3_ARGS=()
+    if [[ "${SAM_MODEL}" == "sam3" ]]; then
+        SAM3_ARGS=(--sam3_text_prompt "${SAM3_TEXT_PROMPT}")
+    fi
+
     case "${STAGES}" in
-        1)
+        1a)
             echo "Submitting SAM2-only pipeline …"
             hlx wf run \
               --team-space research \
@@ -725,18 +808,30 @@ submit_workflow() {
               --execution-name "sam2-${_run_id//_/-}" \
               workflow_master.sam2_only_wf \
               --run_id "${_run_id}" \
-              --sam2_video_uris "${SAM2_VIDEO_URIS}" \
-              --sam2_max_frames "${SAM2_MAX_FRAMES}"
+              --sam_video_uris "${SAM2_VIDEO_URIS}" \
+              --sam_max_frames "${SAM2_MAX_FRAMES}"
+            ;;
+        1b)
+            echo "Submitting SAM3-only pipeline …"
+            hlx wf run \
+              --team-space research \
+              --domain prod \
+              --execution-name "sam3-${_run_id//_/-}" \
+              workflow_master.sam3_only_wf \
+              --run_id "${_run_id}" \
+              --sam_video_uris "${SAM2_VIDEO_URIS}" \
+              --sam_max_frames "${SAM2_MAX_FRAMES}" \
+              "${SAM3_ARGS[@]}"
             ;;
         2)
-            echo "  Using SAM2 data from run: ${SAM2_DATA_RUN_ID}"
+            echo "  Using SAM data from run: ${SAM2_DATA_RUN_ID}"
             hlx wf run \
               --team-space research \
               --domain prod \
               --execution-name "vp-${_prompt_tag}-${_run_id//_/-}" \
               workflow_master.vp_only_wf \
               --run_id "${_run_id}" \
-              --sam2_data_run_id "${SAM2_DATA_RUN_ID}" \
+              --sam_data_run_id "${SAM2_DATA_RUN_ID}" \
               "${VP_COMMON_ARGS[@]}"
             ;;
         3)
@@ -751,44 +846,69 @@ submit_workflow() {
               --vp_output_gcs_path "${_vp_gcs}" \
               "${ALP_COMMON_ARGS[@]}"
             ;;
-        12)
+        12a)
             hlx wf run \
               --team-space research \
               --domain prod \
               --execution-name "sam2-vp-${_prompt_tag}-${_run_id//_/-}" \
               workflow_master.sam2_vp_wf \
               --run_id "${_run_id}" \
-              --sam2_video_uris "${SAM2_VIDEO_URIS}" \
-              --sam2_max_frames "${SAM2_MAX_FRAMES}" \
+              --sam_video_uris "${SAM2_VIDEO_URIS}" \
+              --sam_max_frames "${SAM2_MAX_FRAMES}" \
+              "${VP_COMMON_ARGS[@]}"
+            ;;
+        12b)
+            hlx wf run \
+              --team-space research \
+              --domain prod \
+              --execution-name "sam3-vp-${_prompt_tag}-${_run_id//_/-}" \
+              workflow_master.sam3_vp_wf \
+              --run_id "${_run_id}" \
+              --sam_video_uris "${SAM2_VIDEO_URIS}" \
+              --sam_max_frames "${SAM2_MAX_FRAMES}" \
+              "${SAM3_ARGS[@]}" \
               "${VP_COMMON_ARGS[@]}"
             ;;
         23)
-            echo "  Using SAM2 data from run: ${SAM2_DATA_RUN_ID}"
+            echo "  Using SAM data from run: ${SAM2_DATA_RUN_ID}"
             hlx wf run \
               --team-space research \
               --domain prod \
               --execution-name "vp-alp-${_prompt_tag}-${_run_id//_/-}" \
               workflow_master.vp_alpamayo_wf \
               --run_id "${_run_id}" \
-              --sam2_data_run_id "${SAM2_DATA_RUN_ID}" \
+              --sam_data_run_id "${SAM2_DATA_RUN_ID}" \
               "${VP_COMMON_ARGS[@]}" \
               "${ALP_COMMON_ARGS[@]}"
             ;;
-        123)
+        123a)
             hlx wf run \
               --team-space research \
               --domain prod \
-              --execution-name "master-${_prompt_tag}-${_run_id//_/-}" \
-              workflow_master.master_pipeline_wf \
+              --execution-name "sam2-full-${_prompt_tag}-${_run_id//_/-}" \
+              workflow_master.sam2_pipeline_wf \
               --run_id "${_run_id}" \
-              --sam2_video_uris "${SAM2_VIDEO_URIS}" \
-              --sam2_max_frames "${SAM2_MAX_FRAMES}" \
+              --sam_video_uris "${SAM2_VIDEO_URIS}" \
+              --sam_max_frames "${SAM2_MAX_FRAMES}" \
+              "${VP_COMMON_ARGS[@]}" \
+              "${ALP_COMMON_ARGS[@]}"
+            ;;
+        123b)
+            hlx wf run \
+              --team-space research \
+              --domain prod \
+              --execution-name "sam3-full-${_prompt_tag}-${_run_id//_/-}" \
+              workflow_master.sam3_pipeline_wf \
+              --run_id "${_run_id}" \
+              --sam_video_uris "${SAM2_VIDEO_URIS}" \
+              --sam_max_frames "${SAM2_MAX_FRAMES}" \
+              "${SAM3_ARGS[@]}" \
               "${VP_COMMON_ARGS[@]}" \
               "${ALP_COMMON_ARGS[@]}"
             ;;
         *)
             echo "ERROR: STAGES='${STAGES}' is not a supported combination."
-            echo "       Supported: 1, 2, 3, 12, 23, 123"
+            echo "       Supported: 1a, 1b, 2, 3, 12a, 12b, 23, 123a, 123b"
             exit 1
             ;;
     esac
@@ -798,12 +918,14 @@ submit_workflow() {
 # DISPATCH: LoRA mode (per-prompt separate runs) vs standard mode (single run)
 #
 # LoRA mode (lora_scale > 0):
-#   SAM2 runs ONCE (shared), then VP (+Alp) fans out per prompt/checkpoint.
-#   STAGES=123 → 1× sam2_only_wf  +  N× vp_alpamayo_wf
-#   STAGES=12  → 1× sam2_only_wf  +  N× vp_only_wf
-#   STAGES=23  → N× vp_alpamayo_wf  (SAM2 already done)
-#   STAGES=2   → N× vp_only_wf      (SAM2 already done)
-#   STAGES=3   → N× alpamayo_only_wf (VP already done per prompt)
+#   SAM runs ONCE (shared), then VP (+Alp) fans out per prompt/checkpoint.
+#   STAGES=123a → 1× sam2_only_wf  +  N× vp_alpamayo_wf
+#   STAGES=123b → 1× sam3_only_wf  +  N× vp_alpamayo_wf
+#   STAGES=12a  → 1× sam2_only_wf  +  N× vp_only_wf
+#   STAGES=12b  → 1× sam3_only_wf  +  N× vp_only_wf
+#   STAGES=23   → N× vp_alpamayo_wf  (SAM already done)
+#   STAGES=2    → N× vp_only_wf      (SAM already done)
+#   STAGES=3    → N× alpamayo_only_wf (VP already done per prompt)
 #
 # Standard mode (lora_scale == 0):
 #   All prompts bundled into a single workflow submission.
@@ -812,30 +934,31 @@ SUBMITTED_RUN_IDS=()
 SAM2_LORA_RUN_ID=""           # set when SAM2 is submitted in LoRA mode
 
 if [[ ${USE_LORA} -eq 1 && ${RUN_VP} -eq 1 ]]; then
-    # ── LoRA mode: SAM2 once, then VP (+Alp) per prompt ──────────────────────
+    # ── LoRA mode: SAM once, then VP (+Alp) per prompt ──────────────────────
     echo "LoRA mode ON (scale=${VP_IMG_INPAINTING_LORA_SCALE})"
     echo ""
 
-    # ── Step 1: Submit SAM2 once (if included in STAGES) ─────────────────────
-    if [[ ${RUN_SAM2} -eq 1 ]]; then
-        echo "▶ Submitting SAM2 once (shared across all ${NUM_PROMPTS} LoRA prompt runs) …"
+    # ── Step 1: Submit SAM once (if included in STAGES) ─────────────────────
+    if [[ ${RUN_SAM2} -eq 1 || ${RUN_SAM3} -eq 1 ]]; then
+        echo "▶ Submitting ${SAM_MODEL^^} once (shared across all ${NUM_PROMPTS} LoRA prompt runs) …"
         SAM2_LORA_RUN_ID="${MASTER_RUN_ID}"
         _saved_stages="${STAGES}"
-        STAGES="1"
-        submit_workflow "${SAM2_LORA_RUN_ID}" "sam2"
+        # Submit SAM-only: 1a or 1b
+        STAGES="1${STAGES_SUFFIX}"
+        submit_workflow "${SAM2_LORA_RUN_ID}" "${SAM_MODEL}"
         STAGES="${_saved_stages}"
-        SUBMITTED_RUN_IDS+=("${SAM2_LORA_RUN_ID} (SAM2)")
-        # Point subsequent VP runs at this SAM2 output
+        SUBMITTED_RUN_IDS+=("${SAM2_LORA_RUN_ID} (${SAM_MODEL^^})")
+        # Point subsequent VP runs at this SAM output
         SAM2_DATA_RUN_ID="${SAM2_LORA_RUN_ID}"
         echo ""
-        echo "  ⚠  VP/Alp runs below depend on SAM2 completing first."
+        echo "  ⚠  VP/Alp runs below depend on ${SAM_MODEL^^} completing first."
         echo "     SAM2 data run ID: ${SAM2_DATA_RUN_ID}"
         echo ""
     fi
 
     # ── Step 2: Per-prompt VP (+Alp) runs ────────────────────────────────────
-    # Remove "1" from STAGES → the per-prompt stages (e.g. 123→23, 12→2, 23→23)
-    LORA_PER_PROMPT_STAGES="${STAGES//1/}"
+    # Remove "1" from STAGES_NUM → the per-prompt stages (e.g. 123→23, 12→2, 23→23)
+    LORA_PER_PROMPT_STAGES="${STAGES_NUM//1/}"
 
     if [[ -n "${LORA_PER_PROMPT_STAGES}" ]]; then
         _saved_stages="${STAGES}"
@@ -895,12 +1018,16 @@ else
 fi
 echo "  Stages:               ${STAGES}  (${STAGES_LABEL})"
 echo ""
-if [[ ${RUN_SAM2} -eq 1 ]]; then
-    echo "  Stage 1 — SAM2 (runs once):"
+if [[ ${RUN_SAM} -eq 1 ]]; then
+    echo "  Stage 1 — ${SAM_MODEL^^} (runs once):"
     if [[ -n "${SAM2_LORA_RUN_ID}" ]]; then
         echo "    Run ID:             ${SAM2_LORA_RUN_ID}"
     fi
     echo "    Raw output:         ${SAM2_OUTPUT_BASE}/${SAM2_LORA_RUN_ID:-${MASTER_RUN_ID}}/"
+    if [[ "${SAM_MODEL}" == "sam3" ]]; then
+        echo "    SAM3 raw output:    ${SAM3_OUTPUT_BASE}/${SAM2_LORA_RUN_ID:-${MASTER_RUN_ID}}/"
+        echo "    Text prompt:        ${SAM3_TEXT_PROMPT}"
+    fi
     echo "    Preprocessed (→VP): ${SAM2_PREPROCESSED_OUTPUT_BASE}/${SAM2_LORA_RUN_ID:-${MASTER_RUN_ID}}/"
     echo ""
 fi
@@ -908,8 +1035,8 @@ if [[ ${RUN_VP} -eq 1 ]]; then
     echo "  Stage 2 — VideoPainter:"
     if [[ ${USE_LORA} -eq 1 ]]; then
         for _rid in "${SUBMITTED_RUN_IDS[@]}"; do
-            # Skip the SAM2-only entry
-            [[ "${_rid}" == *"(SAM2)"* ]] && continue
+            # Skip the SAM-only entry
+            [[ "${_rid}" == *"(SAM"*")"* ]] && continue
             echo "    Edited videos:      ${VP_OUTPUT_BASE}/${_rid}/"
         done
     else
@@ -921,7 +1048,7 @@ if [[ ${RUN_ALP} -eq 1 ]]; then
     echo "  Stage 3 — Alpamayo:"
     if [[ ${USE_LORA} -eq 1 ]]; then
         for _rid in "${SUBMITTED_RUN_IDS[@]}"; do
-            [[ "${_rid}" == *"(SAM2)"* ]] && continue
+            [[ "${_rid}" == *"(SAM"*")"* ]] && continue
             echo "    Predictions:        gs://${GCS_BUCKET}/${ALPAMAYO_OUTPUT_BASE}/${_rid}/"
         done
     else

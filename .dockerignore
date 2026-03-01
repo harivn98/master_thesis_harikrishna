@@ -85,4 +85,5 @@ example_workflows/
 # Keep only necessary files for master orchestrator
 # The hlx_wf wheel and workflow.py files are needed
 !segmentation/sam2/hlx_wf-*.whl
+!segmentation/sam3/hlx_wf-*.whl
 !**/workflow.py
